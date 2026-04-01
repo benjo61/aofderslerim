@@ -13,8 +13,14 @@ jobs:
         run: |
           sudo apt-get install -y zlib1g-dev libffi-dev libssl-dev
           pip install buildozer cython setuptools
+      - name: Accept Android licenses
+        run: |
+          mkdir -p ~/.buildozer/android/platform/android-sdk
+          yes | buildozer android debug || true
+          yes | /home/runner/.buildozer/android/platform/android-sdk/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
       - name: Build APK
-        run: buildozer android debug
+        run: |
+          yes | buildozer android debug
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
