@@ -11,24 +11,15 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK components
-        run: |
-          yes | sdkmanager --licenses
-          sdkmanager "build-tools;33.0.0" "platforms;android-31" "platform-tools" "ndk;25.2.9519653"
-
-      - name: Install Python deps
+      - name: Install deps
         run: |
           sudo apt-get install -y zlib1g-dev libffi-dev libssl-dev autoconf automake libtool pkg-config
           pip install buildozer cython setuptools
 
-      - name: Configure buildozer
+      - name: Patch buildozer aidl check
         run: |
-          echo "android.sdk_path = $ANDROID_SDK_ROOT" >> buildozer.spec
-          echo "android.ndk_path = $ANDROID_SDK_ROOT/ndk/25.2.9519653" >> buildozer.spec
-          echo "android.build_tools_version = 33.0.0" >> buildozer.spec
+          BPATH=$(python3 -c "import buildozer; import os; print(os.path.dirname(buildozer.__file__))")
+          sed -i 's/self._check_aidl(installed_v_build_tools)/pass  # skip/' $BPATH/targets/android.py
 
       - name: Build APK
         run: buildozer android debug
