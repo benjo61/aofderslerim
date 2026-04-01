@@ -16,10 +16,13 @@ jobs:
           sudo apt-get install -y zlib1g-dev libffi-dev libssl-dev autoconf automake libtool pkg-config
           pip install buildozer cython setuptools
 
-      - name: Patch buildozer aidl check
+      - name: Setup SDK
         run: |
-          BPATH=$(python3 -c "import buildozer; import os; print(os.path.dirname(buildozer.__file__))")
-          sed -i 's/self._check_aidl(installed_v_build_tools)/pass  # skip/' $BPATH/targets/android.py
+          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses
+          $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager "build-tools;33.0.0" "platforms;android-31"
+          mkdir -p /home/runner/.buildozer/android/platform/
+          ln -s $ANDROID_SDK_ROOT /home/runner/.buildozer/android/platform/android-sdk
+          ln -s $ANDROID_NDK_ROOT /home/runner/.buildozer/android/platform/android-ndk-r25b
 
       - name: Build APK
         run: buildozer android debug
