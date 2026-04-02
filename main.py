@@ -65,7 +65,7 @@ class PDFScreen(Screen):
 class AnaSayfa(Screen):
     def __init__(self, pdf_ac_func, **kwargs):
         super().__init__(**kwargs)
-        tp = TabbedPanel(do_default_tab=False)
+        tp = TabbedPanel(do_default_tab=False, tab_width=200)
         siniflar = get_dirs(DERSLER_PATH)
 
         if not siniflar:
@@ -75,12 +75,12 @@ class AnaSayfa(Screen):
         for sinif in siniflar:
             sinif_tab = TabbedPanelItem(text=sinif)
             sinif_yolu = os.path.join(DERSLER_PATH, sinif)
-            donem_tp = TabbedPanel(do_default_tab=False)
+            donem_tp = TabbedPanel(do_default_tab=False, tab_width=200)
 
             for donem in get_dirs(sinif_yolu):
                 donem_tab = TabbedPanelItem(text=donem)
                 donem_yolu = os.path.join(sinif_yolu, donem)
-                ders_tp = TabbedPanel(do_default_tab=False)
+                ders_tp = TabbedPanel(do_default_tab=False, tab_width=200)
 
                 for ders in get_dirs(donem_yolu):
                     ders_tab = TabbedPanelItem(text=ders)
