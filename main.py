@@ -1,3 +1,350 @@
+import os
+import io
+import traceback
+from kivy.app import App
+from kivy.uix.screenmanager import ScreenManager, Screen
+from kivy.uix.scrollview import ScrollView
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.button import Button
+from kivy.uix.label import Label
+from kivy.uix.image import Image
+from kivy.core.image import Image as CoreImage
+from kivy.metrics import dp
+from kivy.graphics import Color, Rectangle
+from kivy.clock import Clock
+from kivy.core.window import Window
+
+# === TÜM JAVA CLASS'LAR TEK SEFERDE (Invalid ID'nin kesin çözümü) ===
+from jnius import autoclass
+File = autoclass('java.io.File')
+ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
+PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
+Bitmap = autoclass('android.graphics.Bitmap')
+BitmapConfig = autoclass('android.graphics.Bitmap$Config')
+CanvasClass = autoclass('android.graphics.Canvas')
+ColorClass = autoclass('android.graphics.Color')
+ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+
+DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
+
+def get_dirs(yol):
+    try:
+        return sorted([f for f in os.listdir(yol) if os.path.isdir(os.path.join(yol, f))])
+    except:
+        return []
+
+def get_pdfs(yol):
+    try:
+        return sorted([f for f in os.listdir(yol) if f.lower().endswith('.pdf')])
+    except:
+        return []
+
+def ust_bar(baslik, geri_func=None):
+    bar = BoxLayout(size_hint_y=None, height=dp(56), padding=[dp(12), dp(8)], spacing=dp(10))
+    with bar.canvas.before:
+        Color(0.2, 0.5, 0.8, 1)
+        rect = Rectangle(pos=bar.pos, size=bar.size)
+    bar.bind(pos=lambda *a: setattr(rect, 'pos', bar.pos))
+    bar.bind(size=lambda *a: setattr(rect, 'size', bar.size))
+    if geri_func:
+        geri = Button(text='< Geri', size_hint_x=None, width=dp(90),
+                      background_color=(0.1, 0.4, 0.7, 1), font_size=dp(16))
+        geri.bind(on_press=lambda x: geri_func())
+        bar.add_widget(geri)
+    bar.add_widget(Label(text=baslik, font_size=dp(18), bold=True))
+    return bar
+
+def liste_btn(metin, callback):
+    btn = Button(text=metin, size_hint_y=None, height=dp(68), font_size=dp(16),
+                 halign='left', padding_x=dp(20),
+                 background_color=(0.15, 0.15, 0.15, 1))
+    btn.bind(on_press=lambda x: callback())
+    return btn
+
+# --- RAM DOSTU KUYRUK (düzeltilmiş, daha az agresif) ---
+class RenderKuyrugu:
+    kuyruk = []
+    isleniyor = False
+
+    @classmethod
+    def siraya_al(cls, sayfalar):
+        cls.kuyruk = [s for s in sayfalar if not s.yuklendi and not s.yukleniyor]
+        if not cls.isleniyor and cls.kuyruk:
+            cls.isleniyor = True
+            Clock.schedule_once(cls.isle, 0.1)
+
+    @classmethod
+    def isle(cls, dt):
+        if not cls.kuyruk:
+            cls.isleniyor = False
+            return
+        sayfa = cls.kuyruk.pop(0)
+        if not sayfa.yuklendi:
+            sayfa.gercek_yukle()
+        Clock.schedule_once(cls.isle, 0.1)
+
+    @classmethod
+    def durdur(cls):
+        cls.kuyruk = []
+        cls.isleniyor = False
+        Clock.unschedule(cls.isle)
+
+class PDFRenderer:
+    def __init__(self, pdf_yol):
+        f = File(pdf_yol)
+        self.pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+        self.renderer = PdfRenderer(self.pfd)
+        self.sayfa_sayisi = self.renderer.getPageCount()
+
+    def sayfa_render(self, sayfa_no):
+        bitmap = None
+        out = None
+        try:
+            sayfa = self.renderer.openPage(sayfa_no)
+            w = sayfa.getWidth() * 2
+            h = sayfa.getHeight() * 2
+            bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+            canvas = CanvasClass(bitmap)
+            canvas.drawColor(ColorClass.WHITE)
+            sayfa.render(bitmap, None, None, 1)
+            sayfa.close()
+            out = ByteArrayOutputStream()
+            bitmap.compress(CompressFormat.PNG, 85, out)
+            buf = io.BytesIO(bytes(out.toByteArray()))
+            return buf, w, h
+        finally:
+            if bitmap:
+                try: bitmap.recycle()
+                except: pass
+            if out:
+                try: out.close()
+                except: pass
+
+    def kapat(self):
+        try:
+            self.renderer.close()
+            self.pfd.close()
+        except: pass
+
+class SayfaWidget(BoxLayout):
+    def __init__(self, sayfa_no, pdf_renderer, zoom_ref, **kwargs):
+        super().__init__(**kwargs)
+        self.sayfa_no = sayfa_no
+        self.pdf_renderer = pdf_renderer
+        self.zoom_ref = zoom_ref
+        self.orientation = 'vertical'
+        self.size_hint = (None, None)
+        self.width = Window.width
+        self.height = dp(600)
+        self.yuklendi = False
+        self.yukleniyor = False
+        self.img_widget = None
+        self.base_h = dp(600)
+        self.add_widget(Label(text=f'Sayfa {sayfa_no + 1} yükleniyor...', size_hint_y=None, height=dp(600), color=(0.6, 0.6, 0.6, 1)))
+
+    def gercek_yukle(self):
+        if self.yuklendi or self.yukleniyor: return
+        self.yukleniyor = True
+        try:
+            buf, w, h = self.pdf_renderer.sayfa_render(self.sayfa_no)
+            self.base_h = Window.width * (h / w)
+            goster_h = self.base_h * self.zoom_ref[0]
+            goster_w = Window.width * self.zoom_ref[0]
+            core_img = CoreImage(buf, ext='png')
+            img = Image(texture=core_img.texture, size_hint=(None, None),
+                        size=(goster_w, goster_h), allow_stretch=True, keep_ratio=True)
+            self.img_widget = img
+            self.clear_widgets()
+            self.width = goster_w
+            self.height = goster_h
+            self.add_widget(img)
+            self.yuklendi = True
+        except Exception as e:
+            self.clear_widgets()
+            self.add_widget(Label(text=f'Hata: {str(e)}\n{traceback.format_exc()[:300]}',
+                                  size_hint_y=None, height=dp(120), color=(1, 0.3, 0.3, 1)))
+        finally:
+            self.yukleniyor = False
+
+    def zoom_guncelle(self, zoom):
+        if self.img_widget:
+            yeni_h = self.base_h * zoom
+            yeni_w = Window.width * zoom
+            self.img_widget.size = (yeni_w, yeni_h)
+            self.width = yeni_w
+            self.height = yeni_h
+
+class LazyPDFScroll(ScrollView):
+    def __init__(self, pdf_renderer, sayfa_sayisi, **kwargs):
+        super().__init__(**kwargs)
+        self.pdf_renderer = pdf_renderer
+        self.zoom_ref = [1.0]
+        self.sayfalar = []
+        self.ic = BoxLayout(orientation='vertical', size_hint=(None, None), spacing=dp(8), padding=[dp(8), dp(8)])
+        self.ic.bind(minimum_height=self.ic.setter('height'))
+        self.ic.bind(minimum_width=self.ic.setter('width'))
+        for i in range(sayfa_sayisi):
+            sw = SayfaWidget(sayfa_no=i, pdf_renderer=pdf_renderer, zoom_ref=self.zoom_ref)
+            self.sayfalar.append(sw)
+            self.ic.add_widget(sw)
+        self.add_widget(self.ic)
+        self.bind(scroll_y=self.scroll_degisti)
+        Clock.schedule_once(self.ilklendirme_yukle, 0.2)
+
+    def ilklendirme_yukle(self, dt):
+        for i in range(min(3, len(self.sayfalar))):
+            self.sayfalar[i].gercek_yukle()
+
+    def scroll_degisti(self, *args):
+        Clock.unschedule(self.gorunen_yukle_tetikle)
+        Clock.schedule_once(self.gorunen_yukle_tetikle, 0.25)
+
+    def gorunen_yukle_tetikle(self, dt):
+        self.gorunen_yukle()
+
+    def gorunen_yukle(self):
+        if not self.sayfalar: return
+        toplam = len(self.sayfalar)
+        oran = 1 - self.scroll_y
+        orta = int(oran * toplam)
+        hedef = []
+        for i in range(max(0, orta - 2), min(toplam, orta + 3)):
+            hedef.append(self.sayfalar[i])
+        RenderKuyrugu.siraya_al(hedef)
+
+    def zoom_yap(self, delta):
+        self.zoom_ref[0] = max(0.5, min(3.0, self.zoom_ref[0] + delta))
+        for s in self.sayfalar:
+            s.zoom_guncelle(self.zoom_ref[0])
+
+class PDFEkrani(Screen):
+    def __init__(self, pdf_yol, geri_func, **kwargs):
+        super().__init__(**kwargs)
+        self.pdf_yol = pdf_yol
+        self.geri_func = geri_func
+        self.pdf_renderer = None
+        self.lazy_scroll = None
+        layout = BoxLayout(orientation='vertical')
+        baslik = os.path.basename(pdf_yol)[:-4]
+        layout.add_widget(ust_bar(baslik, self.geri_git))
+        self.icerik_alani = BoxLayout(orientation='vertical')
+        self.icerik_alani.add_widget(Label(text="PDF yükleniyor...\nLütfen bekleyin", size_hint_y=None, height=dp(100)))
+        layout.add_widget(self.icerik_alani)
+        self.add_widget(layout)
+
+    def on_enter(self):
+        Clock.schedule_once(self.pdfi_yukle, 0.1)
+
+    def pdfi_yukle(self, dt):
+        self.icerik_alani.clear_widgets()
+        try:
+            self.pdf_renderer = PDFRenderer(self.pdf_yol)
+            self.lazy_scroll = LazyPDFScroll(pdf_renderer=self.pdf_renderer, sayfa_sayisi=self.pdf_renderer.sayfa_sayisi)
+            zoom_bar = BoxLayout(size_hint_y=None, height=dp(60), spacing=dp(10), padding=[dp(10), dp(8)])
+            with zoom_bar.canvas.before:
+                Color(0.12, 0.12, 0.12, 1)
+                r = Rectangle(pos=zoom_bar.pos, size=zoom_bar.size)
+            zoom_bar.bind(pos=lambda *a: setattr(r, 'pos', zoom_bar.pos))
+            zoom_bar.bind(size=lambda *a: setattr(r, 'size', zoom_bar.size))
+            btn_k = Button(text='−', font_size=dp(32), background_color=(0.2, 0.5, 0.8, 1))
+            btn_b = Button(text='+', font_size=dp(32), background_color=(0.2, 0.5, 0.8, 1))
+            self.zoom_lbl = Label(text='%100', font_size=dp(18), size_hint_x=0.4)
+            btn_k.bind(on_press=lambda x: self.zoom(-0.2))
+            btn_b.bind(on_press=lambda x: self.zoom(0.2))
+            zoom_bar.add_widget(btn_k)
+            zoom_bar.add_widget(self.zoom_lbl)
+            zoom_bar.add_widget(btn_b)
+            self.icerik_alani.add_widget(self.lazy_scroll)
+            self.icerik_alani.add_widget(zoom_bar)
+        except Exception as e:
+            self.icerik_alani.add_widget(Label(text=f'PDF açılamadı:\n{str(e)}', color=(1, 0.3, 0.3, 1)))
+
+    def zoom(self, delta):
+        if self.lazy_scroll:
+            self.lazy_scroll.zoom_yap(delta)
+            yuzde = int(self.lazy_scroll.zoom_ref[0] * 100)
+            self.zoom_lbl.text = f'%{yuzde}'
+
+    def geri_git(self):
+        RenderKuyrugu.durdur()
+        if self.pdf_renderer:
+            self.pdf_renderer.kapat()
+        self.geri_func()
+
+class ListeEkrani(Screen):
+    def __init__(self, baslik, ogeler, tikla_func, geri_func=None, pdf_mi=False, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        layout.add_widget(ust_bar(baslik, geri_func))
+        scroll = ScrollView()
+        ic = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(2))
+        ic.bind(minimum_height=ic.setter('height'))
+        if not ogeler:
+            ic.add_widget(Label(text='İçerik bulunamadı!', height=dp(80)))
+        for oge in ogeler:
+            ad = oge[:-4] if pdf_mi and oge.lower().endswith('.pdf') else oge
+            btn = liste_btn(ad, lambda o=oge: tikla_func(o))
+            ic.add_widget(btn)
+        scroll.add_widget(ic)
+        layout.add_widget(scroll)
+        self.add_widget(layout)
+
+class DerslerApp(App):
+    def build(self):
+        try:
+            from android.permissions import request_permissions, Permission
+            request_permissions([Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
+        except: pass
+        self.sm = ScreenManager()
+        self.secili = {}
+        self.sinif_ekrani()
+        return self.sm
+
+    def temizle(self):
+        for s in list(self.sm.screens): self.sm.remove_widget(s)
+
+    def sinif_ekrani(self):
+        self.temizle()
+        self.sm.add_widget(ListeEkrani(baslik='AÖF Derslerim', ogeler=get_dirs(DERSLER_PATH), tikla_func=self.donem_ekrani, name='sinif'))
+        self.sm.current = 'sinif'
+
+    def donem_ekrani(self, sinif):
+        self.secili['sinif'] = sinif
+        self.temizle()
+        yol = os.path.join(DERSLER_PATH, sinif)
+        self.sm.add_widget(ListeEkrani(baslik=sinif, ogeler=get_dirs(yol), tikla_func=self.ders_ekrani, geri_func=self.sinif_ekrani, name='donem'))
+        self.sm.current = 'donem'
+
+    def ders_ekrani(self, donem):
+        self.secili['donem'] = donem
+        self.temizle()
+        yol = os.path.join(DERSLER_PATH, self.secili['sinif'], donem)
+        self.sm.add_widget(ListeEkrani(baslik=donem, ogeler=get_dirs(yol), tikla_func=self.pdf_liste, geri_func=lambda: self.donem_ekrani(self.secili['sinif']), name='ders'))
+        self.sm.current = 'ders'
+
+    def pdf_liste(self, ders):
+        self.secili['ders'] = ders
+        self.temizle()
+        yol = os.path.join(DERSLER_PATH, self.secili['sinif'], self.secili['donem'], ders)
+        self.sm.add_widget(ListeEkrani(baslik=ders, ogeler=get_pdfs(yol), tikla_func=lambda pdf: self.pdf_ac(os.path.join(yol, pdf)), geri_func=lambda: self.ders_ekrani(self.secili['donem']), pdf_mi=True, name='pdfler'))
+        self.sm.current = 'pdfler'
+
+    def pdf_ac(self, yol):
+        self.temizle()
+        self.sm.add_widget(PDFEkrani(pdf_yol=yol, geri_func=lambda: self.pdf_liste(self.secili['ders']), name='pdf'))
+        self.sm.current = 'pdf'
+
+DerslerApp().run()
+git add main.py && git commit -m "AÖF SORUNSUZ - İçeride PDF viewer (PdfRenderer)" && git push
+buildozer android debug deploy run
+git add main.py
+git commit -m "Touch-Clear Delay ile Kivy Touch Crash Kesin Çözümü"
+git push
+
+cd ~/derslerim_app
+rm main.py
+cat > main.py << 'EOF'
 import os, io
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
@@ -42,7 +389,6 @@ def liste_btn(metin, callback):
     btn.bind(on_press=lambda x: callback())
     return btn
 
-# Sadece ihtiyaç anında tek sayfa basan temiz motor
 class PDFRenderer:
     def __init__(self, pdf_yol):
         from jnius import autoclass
@@ -101,16 +447,15 @@ class PDFEkrani(Screen):
         self.geri_func = geri_func
         self.pdf_renderer = None
         self.mevcut_sayfa = 0
+        self.islem_yapiyor = False
         
         self.layout = BoxLayout(orientation='vertical')
         baslik = os.path.basename(pdf_yol)[:-4]
         self.layout.add_widget(ust_bar(baslik, self.geri_git))
         
-        # Sadece resmi barındıracak, ScrollView OLMAYAN alan
         self.goruntu_alani = BoxLayout(orientation='vertical')
         self.layout.add_widget(self.goruntu_alani)
         
-        # Alt Sayfalama Barı
         alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
         with alt_bar.canvas.before:
             Color(0.1, 0.1, 0.1, 1)
@@ -121,7 +466,7 @@ class PDFEkrani(Screen):
         self.btn_onceki = Button(text='<< ONCEKI', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
         self.btn_onceki.bind(on_press=self.onceki_sayfa)
         
-        self.lbl_sayfa = Label(text='Yukleniyor...', bold=True)
+        self.lbl_sayfa = Label(text='Hazirlaniyor...', bold=True)
         
         self.btn_sonraki = Button(text='SONRAKI >>', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
         self.btn_sonraki.bind(on_press=self.sonraki_sayfa)
@@ -134,7 +479,7 @@ class PDFEkrani(Screen):
         self.add_widget(self.layout)
 
     def on_enter(self):
-        Clock.schedule_once(self.baslat, 0.1)
+        Clock.schedule_once(self.baslat, 0.6)
 
     def baslat(self, dt):
         try:
@@ -146,51 +491,54 @@ class PDFEkrani(Screen):
 
     def sayfa_goster(self, sayfa_no):
         if not self.pdf_renderer: return
-        self.goruntu_alani.clear_widgets()
-        self.goruntu_alani.add_widget(Label(text="Sayfa Isleniyor..."))
+        self.islem_yapiyor = True
+        self.btn_onceki.disabled = True
+        self.btn_sonraki.disabled = True
         
-        # Donmayı engellemek için çizimi bir sonraki frame'e bırakıyoruz
-        Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.05)
+        self.goruntu_alani.clear_widgets()
+        self.goruntu_alani.add_widget(Label(text="Sayfa Isleniyor... \nLutfen Dokunmayin!"))
+        
+        Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.5)
 
     def _render_ve_bas(self, sayfa_no):
         try:
-            buf = self.pdf_renderer.sayfa_render(sayfa_no, zoom=2.0) # Yüksek kalite render
+            buf = self.pdf_renderer.sayfa_render(sayfa_no, zoom=2.0)
             core_img = CoreImage(buf, ext='png')
             
             self.goruntu_alani.clear_widgets()
-            
-            # ScrollView'in yerini alan serbest Zoom/Pan modülü!
             scatter = Scatter(do_rotation=False, scale_min=1.0, scale_max=5.0)
             img = Image(texture=core_img.texture, allow_stretch=True, keep_ratio=True)
             
-            # Resim boyutunu ekrana oturtuyoruz
             img.size = self.goruntu_alani.size
             scatter.size = self.goruntu_alani.size
             
             scatter.add_widget(img)
             self.goruntu_alani.add_widget(scatter)
             
-            # Barı güncelle
             toplam = self.pdf_renderer.sayfa_sayisi
             self.lbl_sayfa.text = f"{sayfa_no + 1} / {toplam}"
+            
+            self.islem_yapiyor = False
             self.btn_onceki.disabled = (sayfa_no == 0)
             self.btn_sonraki.disabled = (sayfa_no == toplam - 1)
             
         except Exception as e:
+            self.islem_yapiyor = False
             self.goruntu_alani.clear_widgets()
             self.goruntu_alani.add_widget(Label(text=f'Hata:\n{str(e)}'))
 
     def onceki_sayfa(self, instance):
-        if self.mevcut_sayfa > 0:
+        if self.mevcut_sayfa > 0 and not self.islem_yapiyor:
             self.mevcut_sayfa -= 1
             self.sayfa_goster(self.mevcut_sayfa)
 
     def sonraki_sayfa(self, instance):
-        if self.pdf_renderer and self.mevcut_sayfa < self.pdf_renderer.sayfa_sayisi - 1:
+        if self.pdf_renderer and self.mevcut_sayfa < self.pdf_renderer.sayfa_sayisi - 1 and not self.islem_yapiyor:
             self.mevcut_sayfa += 1
             self.sayfa_goster(self.mevcut_sayfa)
 
     def geri_git(self):
+        if self.islem_yapiyor: return 
         if self.pdf_renderer:
             self.pdf_renderer.kapat()
         self.geri_func()
