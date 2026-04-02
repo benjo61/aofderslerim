@@ -1,5 +1,4 @@
-import os
-import fitz
+import os, io, fitz
 from kivy.app import App
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.scrollview import ScrollView
@@ -9,22 +8,19 @@ from kivy.uix.label import Label
 from kivy.uix.image import Image
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.core.image import Image as CoreImage
-from kivy.uix.floatlayout import FloatLayout
-import io
+from android.permissions import request_permissions, Permission
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
 def get_dirs(yol):
     try:
-        return sorted([f for f in os.listdir(yol)
-            if os.path.isdir(os.path.join(yol, f))])
+        return sorted([f for f in os.listdir(yol) if os.path.isdir(os.path.join(yol, f))])
     except:
         return []
 
 def get_pdfs(yol):
     try:
-        return sorted([f for f in os.listdir(yol)
-            if f.lower().endswith('.pdf')])
+        return sorted([f for f in os.listdir(yol) if f.lower().endswith('.pdf')])
     except:
         return []
 
@@ -33,16 +29,14 @@ class PDFScreen(Screen):
         super().__init__(**kwargs)
         layout = BoxLayout(orientation='vertical')
 
-        # Üst bar
         ust = BoxLayout(size_hint_y=None, height=60, padding=[5,5], spacing=5)
         geri_btn = Button(text='← Geri', size_hint_x=None, width=120)
         geri_btn.bind(on_press=lambda x: geri_func())
-        baslik = Label(text=os.path.basename(pdf_yol)[:-4], font_size=14)
+        baslik = Label(text=os.path.basename(pdf_yol)[:-4], font_size=13)
         ust.add_widget(geri_btn)
         ust.add_widget(baslik)
         layout.add_widget(ust)
 
-        # PDF sayfaları
         scroll = ScrollView()
         sayfa_layout = BoxLayout(orientation='vertical',
             size_hint_y=None, spacing=5, padding=[5,5])
@@ -50,21 +44,18 @@ class PDFScreen(Screen):
 
         try:
             doc = fitz.open(pdf_yol)
-            for sayfa_no in range(len(doc)):
-                sayfa = doc[sayfa_no]
-                mat = fitz.Matrix(2, 2)  # 2x zoom
-                pix = sayfa.get_pixmap(matrix=mat)
-                img_data = pix.tobytes('png')
-                buf = io.BytesIO(img_data)
+            for i in range(len(doc)):
+                sayfa = doc[i]
+                pix = sayfa.get_pixmap(matrix=fitz.Matrix(2, 2))
+                buf = io.BytesIO(pix.tobytes('png'))
                 core_img = CoreImage(buf, ext='png')
                 img = Image(texture=core_img.texture,
-                    size_hint_y=None,
-                    height=pix.height / 2)
+                    size_hint_y=None, height=pix.height / 2)
                 sayfa_layout.add_widget(img)
             doc.close()
         except Exception as e:
             sayfa_layout.add_widget(Label(
-                text=f'PDF açılamadı:\n{str(e)}',
+                text=f'PDF açılamadı: {str(e)}',
                 size_hint_y=None, height=100))
 
         scroll.add_widget(sayfa_layout)
@@ -127,17 +118,18 @@ class AnaSayfa(Screen):
 class DerslerApp(App):
     def build(self):
         self.sm = ScreenManager()
-        ana = AnaSayfa(pdf_ac_func=self.pdf_ac, name='ana')
-        self.sm.add_widget(ana)
+        self.ana = AnaSayfa(pdf_ac_func=self.pdf_ac, name='ana')
+        self.sm.add_widget(self.ana)
+        request_permissions([
+            Permission.READ_EXTERNAL_STORAGE,
+            Permission.WRITE_EXTERNAL_STORAGE,
+        ], lambda *x: None)
         return self.sm
 
     def pdf_ac(self, yol):
         if self.sm.has_screen('pdf'):
             self.sm.remove_widget(self.sm.get_screen('pdf'))
-        pdf_screen = PDFScreen(
-            pdf_yol=yol,
-            geri_func=self.geri_don,
-            name='pdf')
+        pdf_screen = PDFScreen(pdf_yol=yol, geri_func=self.geri_don, name='pdf')
         self.sm.add_widget(pdf_screen)
         self.sm.current = 'pdf'
 
