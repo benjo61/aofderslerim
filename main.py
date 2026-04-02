@@ -10,7 +10,7 @@ from kivy.core.image import Image as CoreImage
 from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
-from kivy.uix.scatter import Scatter
+from kivy.core.window import Window
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -49,18 +49,60 @@ def liste_btn(metin, callback):
     btn.bind(on_press=lambda x: callback())
     return btn
 
+class PDFRenderer:
+    def __init__(self, pdf_yol):
+        from jnius import autoclass
+        PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
+        ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
+        File = autoclass('java.io.File')
+        f = File(pdf_yol)
+        self.pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+        self.renderer = PdfRenderer(self.pfd)
+        self.sayfa_sayisi = self.renderer.getPageCount()
+
+    def sayfa_render(self, sayfa_no):
+        from jnius import autoclass
+        Bitmap = autoclass('android.graphics.Bitmap')
+        BitmapConfig = autoclass('android.graphics.Bitmap$Config')
+        Canvas = autoclass('android.graphics.Canvas')
+        PaintColor = autoclass('android.graphics.Color')
+        ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+        CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+        sayfa = self.renderer.openPage(sayfa_no)
+        w = sayfa.getWidth() * 2
+        h = sayfa.getHeight() * 2
+        bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+        canvas = Canvas(bitmap)
+        canvas.drawColor(PaintColor.WHITE)
+        sayfa.render(bitmap, None, None, 1)
+        sayfa.close()
+        out = ByteArrayOutputStream()
+        bitmap.compress(CompressFormat.PNG, 90, out)
+        buf = io.BytesIO(bytes(out.toByteArray()))
+        return buf, w, h
+
+    def kapat(self):
+        try:
+            self.renderer.close()
+            self.pfd.close()
+        except:
+            pass
+
 class SayfaWidget(BoxLayout):
-    def __init__(self, sayfa_no, pdf_yol, **kwargs):
+    def __init__(self, sayfa_no, pdf_renderer, zoom_ref, **kwargs):
         super().__init__(**kwargs)
         self.sayfa_no = sayfa_no
-        self.pdf_yol = pdf_yol
+        self.pdf_renderer = pdf_renderer
+        self.zoom_ref = zoom_ref
         self.orientation = 'vertical'
         self.size_hint_y = None
-        self.height = dp(400)
+        self.height = dp(500)
         self.yuklendi = False
+        self.img_widget = None
+        self.base_h = dp(500)
         self.add_widget(Label(
             text=f'Sayfa {sayfa_no + 1}',
-            size_hint_y=None, height=dp(400),
+            size_hint_y=None, height=dp(500),
             color=(0.5, 0.5, 0.5, 1)))
 
     def yukle(self):
@@ -68,80 +110,48 @@ class SayfaWidget(BoxLayout):
             return
         self.yuklendi = True
         try:
-            from jnius import autoclass
-            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
-            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
-            File = autoclass('java.io.File')
-            Bitmap = autoclass('android.graphics.Bitmap')
-            BitmapConfig = autoclass('android.graphics.Bitmap$Config')
-            Canvas = autoclass('android.graphics.Canvas')
-            PaintColor = autoclass('android.graphics.Color')
-            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
-            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-
-            f = File(self.pdf_yol)
-            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-            renderer = PdfRenderer(pfd)
-            sayfa = renderer.openPage(self.sayfa_no)
-            w = sayfa.getWidth() * 2
-            h = sayfa.getHeight() * 2
-
-            # ARGB_8888 + beyaz arka plan
-            bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
-            canvas = Canvas(bitmap)
-            canvas.drawColor(PaintColor.WHITE)
-            sayfa.render(bitmap, None, None, 1)
-            sayfa.close()
-            renderer.close()
-            pfd.close()
-
-            out = ByteArrayOutputStream()
-            bitmap.compress(CompressFormat.PNG, 95, out)
-            buf = io.BytesIO(bytes(out.toByteArray()))
+            buf, w, h = self.pdf_renderer.sayfa_render(self.sayfa_no)
             core_img = CoreImage(buf, ext='png')
-
-            self.clear_widgets()
-            self.height = h / 2
-
-            # Scatter ile pinch zoom
-            scatter = Scatter(
-                do_rotation=False,
-                do_translation=True,
-                scale_min=0.5,
-                scale_max=4.0,
-                size_hint_y=None,
-                height=h / 2
-            )
+            zoom = self.zoom_ref[0]
+            goster_h = (Window.width * zoom) * (h / w)
+            self.base_h = Window.width * (h / w)
             img = Image(
                 texture=core_img.texture,
-                size=scatter.size,
+                size_hint_y=None,
+                height=goster_h,
                 allow_stretch=True,
-                keep_ratio=True
-            )
-            scatter.bind(size=lambda s, v: setattr(img, 'size', v))
-            scatter.add_widget(img)
-            self.add_widget(scatter)
-
+                keep_ratio=True)
+            self.img_widget = img
+            self.clear_widgets()
+            self.height = goster_h
+            self.add_widget(img)
         except Exception as e:
             self.clear_widgets()
             self.add_widget(Label(
                 text=f'Hata: {str(e)}',
-                size_hint_y=None, height=dp(100)))
+                size_hint_y=None, height=dp(80)))
+
+    def zoom_guncelle(self, zoom):
+        if self.img_widget:
+            yeni_h = self.base_h * zoom
+            self.img_widget.height = yeni_h
+            self.height = yeni_h
 
 class LazyPDFScroll(ScrollView):
-    def __init__(self, pdf_yol, sayfa_sayisi, **kwargs):
+    def __init__(self, pdf_renderer, **kwargs):
         super().__init__(**kwargs)
+        self.pdf_renderer = pdf_renderer
+        self.zoom_ref = [1.0]  # başlangıç zoom
         self.sayfalar = []
         self.ic = BoxLayout(orientation='vertical',
-            size_hint_y=None, spacing=dp(8),
+            size_hint_y=None, spacing=dp(6),
             padding=[dp(4), dp(4)])
         self.ic.bind(minimum_height=self.ic.setter('height'))
-
-        for i in range(sayfa_sayisi):
-            sw = SayfaWidget(sayfa_no=i, pdf_yol=pdf_yol)
+        for i in range(pdf_renderer.sayfa_sayisi):
+            sw = SayfaWidget(sayfa_no=i, pdf_renderer=pdf_renderer,
+                zoom_ref=self.zoom_ref)
             self.sayfalar.append(sw)
             self.ic.add_widget(sw)
-
         self.add_widget(self.ic)
         self.bind(scroll_y=self.scroll_degisti)
         Clock.schedule_once(lambda dt: self.ilk_yukle(), 0.3)
@@ -151,38 +161,74 @@ class LazyPDFScroll(ScrollView):
             self.sayfalar[i].yukle()
 
     def scroll_degisti(self, *args):
-        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.1)
+        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.15)
 
     def gorunen_yukle(self):
         if not self.sayfalar:
             return
         toplam = len(self.sayfalar)
-        gorünen_oran = 1 - self.scroll_y
-        orta = int(gorünen_oran * toplam)
+        oran = 1 - self.scroll_y
+        orta = int(oran * toplam)
         for i in range(max(0, orta - 2), min(toplam, orta + 5)):
             self.sayfalar[i].yukle()
+
+    def zoom_yap(self, delta):
+        self.zoom_ref[0] = max(0.5, min(3.0, self.zoom_ref[0] + delta))
+        for s in self.sayfalar:
+            s.zoom_guncelle(self.zoom_ref[0])
 
 class PDFEkrani(Screen):
     def __init__(self, pdf_yol, geri_func, **kwargs):
         super().__init__(**kwargs)
+        self.geri_func = geri_func
+        self.pdf_renderer = None
         layout = BoxLayout(orientation='vertical')
         baslik = os.path.basename(pdf_yol)[:-4]
-        layout.add_widget(ust_bar(baslik, geri_func))
+        layout.add_widget(ust_bar(baslik, self.geri_git))
+
         try:
-            from jnius import autoclass
-            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
-            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
-            File = autoclass('java.io.File')
-            f = File(pdf_yol)
-            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-            renderer = PdfRenderer(pfd)
-            sayfa_sayisi = renderer.getPageCount()
-            renderer.close()
-            pfd.close()
-            layout.add_widget(LazyPDFScroll(pdf_yol=pdf_yol, sayfa_sayisi=sayfa_sayisi))
+            self.pdf_renderer = PDFRenderer(pdf_yol)
+            self.lazy_scroll = LazyPDFScroll(pdf_renderer=self.pdf_renderer)
+
+            # Zoom butonları
+            zoom_bar = BoxLayout(size_hint_y=None, height=dp(50),
+                spacing=dp(5), padding=[dp(5), dp(5)])
+            with zoom_bar.canvas.before:
+                Color(0.1, 0.1, 0.1, 1)
+                rect2 = Rectangle(pos=zoom_bar.pos, size=zoom_bar.size)
+            zoom_bar.bind(pos=lambda *a: setattr(rect2, 'pos', zoom_bar.pos))
+            zoom_bar.bind(size=lambda *a: setattr(rect2, 'size', zoom_bar.size))
+
+            btn_kucult = Button(text='  −  ', font_size=dp(24),
+                background_color=(0.2, 0.5, 0.8, 1), background_normal='')
+            btn_buyut = Button(text='  +  ', font_size=dp(24),
+                background_color=(0.2, 0.5, 0.8, 1), background_normal='')
+            self.zoom_lbl = Label(text='%100', font_size=dp(16), size_hint_x=0.4)
+
+            btn_kucult.bind(on_press=lambda x: self.zoom(-0.15))
+            btn_buyut.bind(on_press=lambda x: self.zoom(0.15))
+
+            zoom_bar.add_widget(btn_kucult)
+            zoom_bar.add_widget(self.zoom_lbl)
+            zoom_bar.add_widget(btn_buyut)
+
+            layout.add_widget(self.lazy_scroll)
+            layout.add_widget(zoom_bar)
+
         except Exception as e:
             layout.add_widget(Label(text=f'PDF acilamadi:\n{str(e)}'))
+
         self.add_widget(layout)
+
+    def zoom(self, delta):
+        self.lazy_scroll.zoom_yap(delta)
+        yuzde = int(self.lazy_scroll.zoom_ref[0] * 100)
+        self.zoom_lbl.text = f'%{yuzde}'
+
+    def geri_git(self):
+        if self.pdf_renderer:
+            self.pdf_renderer.kapat()
+        self.geri_func()
 
 class ListeEkrani(Screen):
     def __init__(self, baslik, ogeler, tikla_func, geri_func=None, pdf_mi=False, **kwargs):
