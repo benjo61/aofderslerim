@@ -64,10 +64,8 @@ class PDFRenderer:
         bitmap = None
         fos = None
         
-        # HAYAT KURTARICI HAMLE: Her sayfa için BENZERSİZ isim, önbellek krizini yok eder!
         temp_path = os.path.join(DERSLER_PATH, f'.cache_page_{sayfa_no}.png')
         
-        # Daha önce çizildiyse, tekrar işlemciyi yorma, direkt göster!
         if os.path.exists(temp_path):
             return temp_path
             
@@ -116,6 +114,16 @@ class PDFEkrani(Screen):
         self.goruntu_alani = BoxLayout(orientation='vertical')
         self.layout.add_widget(self.goruntu_alani)
         
+        # --- SABİT TUVAL (ASLA SİLİNMEYECEK) ---
+        self.scatter = Scatter(do_rotation=False, scale_min=1.0, scale_max=5.0)
+        self.sayfa_resmi = Image(allow_stretch=True, keep_ratio=True)
+        self.scatter.add_widget(self.sayfa_resmi)
+        
+        # Ekran boyutu değiştikçe resmi oturtmak için
+        self.goruntu_alani.bind(size=self.boyutlari_guncelle)
+        self.goruntu_alani.add_widget(self.scatter)
+        # --------------------------------------
+        
         self.alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
         with self.alt_bar.canvas.before:
             Color(0.1, 0.1, 0.1, 1)
@@ -126,7 +134,7 @@ class PDFEkrani(Screen):
         self.btn_onceki = Button(text='<< ONCEKI', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
         self.btn_onceki.bind(on_release=self.onceki_sayfa)
         
-        self.lbl_sayfa = Label(text='-', bold=True)
+        self.lbl_sayfa = Label(text='Hazirlaniyor...', bold=True)
         
         self.btn_sonraki = Button(text='SONRAKI >>', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
         self.btn_sonraki.bind(on_release=self.sonraki_sayfa)
@@ -135,67 +143,49 @@ class PDFEkrani(Screen):
         self.alt_bar.add_widget(self.lbl_sayfa)
         self.alt_bar.add_widget(self.btn_sonraki)
         
+        self.layout.add_widget(self.alt_bar)
         self.add_widget(self.layout)
 
-    def on_enter(self):
-        self.goruntu_alani.clear_widgets()
-        uyari_lbl = Label(text="Dokunmatik çökmesini önlemek için\nPDF'i baslat butonuna basin.", halign='center', color=(0.7,0.7,0.7,1))
-        
-        self.btn_baslat = Button(
-            text="KITABI YUKLE VE AC", 
-            font_size=dp(20), bold=True,
-            size_hint=(1, None), height=dp(100),
-            background_color=(0.1, 0.6, 0.2, 1)
-        )
-        self.btn_baslat.bind(on_release=self.manuel_tetikleyici)
-        
-        bosluk = BoxLayout() 
-        self.goruntu_alani.add_widget(uyari_lbl)
-        self.goruntu_alani.add_widget(self.btn_baslat)
-        self.goruntu_alani.add_widget(bosluk)
+    def boyutlari_guncelle(self, instance, value):
+        self.scatter.size = value
+        self.sayfa_resmi.size = value
 
-    def manuel_tetikleyici(self, instance):
-        self.btn_baslat.disabled = True
-        self.btn_baslat.text = "Motor Isiniyor...\nLutfen Bekleyin"
-        self.btn_baslat.background_color = (0.5, 0.5, 0.5, 1)
-        Clock.schedule_once(self.motoru_kur, 0.4)
+    def on_enter(self):
+        self.islem_yapiyor = True
+        self.btn_onceki.disabled = True
+        self.btn_sonraki.disabled = True
+        self.lbl_sayfa.text = "Motor Isiniyor..."
+        Clock.schedule_once(self.motoru_kur, 0.2)
 
     def motoru_kur(self, dt):
         try:
             self.pdf_renderer = PDFRenderer(self.pdf_yol)
-            if self.alt_bar not in self.layout.children:
-                self.layout.add_widget(self.alt_bar)
             self.sayfa_hazirla(self.mevcut_sayfa)
         except Exception as e:
-            self.goruntu_alani.clear_widgets()
-            self.goruntu_alani.add_widget(Label(text=f'Motor Hatasi:\n{str(e)}'))
+            self.lbl_sayfa.text = "Hata Olustu"
+            print(f'Motor Hatasi: {str(e)}')
 
     def sayfa_hazirla(self, sayfa_no):
         if not self.pdf_renderer: return
         self.islem_yapiyor = True
         self.btn_onceki.disabled = True
         self.btn_sonraki.disabled = True
+        self.lbl_sayfa.text = "Sayfa Yukleniyor..."
         
-        self.goruntu_alani.clear_widgets()
-        self.goruntu_alani.add_widget(Label(text=f"Sayfa {sayfa_no + 1} Ciziliyor...\nLutfen Dokunmayin!"))
-        
+        # Çizim işlemi donmayı engellemek için gecikmeli başlar
         Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.1)
 
     def _render_ve_bas(self, sayfa_no):
         try:
             cache_yol = self.pdf_renderer.sayfa_render(sayfa_no, zoom=2.0)
             
-            self.goruntu_alani.clear_widgets()
-            scatter = Scatter(do_rotation=False, scale_min=1.0, scale_max=5.0)
+            # WIDGET SİLMEK YOK. Sadece resmin yolunu değiştiriyoruz.
+            self.sayfa_resmi.source = cache_yol
+            self.sayfa_resmi.reload()
             
-            # Resim doğrudan eşsiz cache yolundan çekilir. Önbellek bug'ı %100 bitti.
-            img = Image(source=cache_yol, allow_stretch=True, keep_ratio=True)
-            
-            img.size = self.goruntu_alani.size
-            scatter.size = self.goruntu_alani.size
-            
-            scatter.add_widget(img)
-            self.goruntu_alani.add_widget(scatter)
+            # Yeni sayfaya geçince zoom'u ve pozisyonu sıfırla
+            self.scatter.scale = 1.0
+            self.scatter.pos = (0, 0)
             
             toplam = self.pdf_renderer.sayfa_sayisi
             self.lbl_sayfa.text = f"{sayfa_no + 1} / {toplam}"
@@ -206,8 +196,8 @@ class PDFEkrani(Screen):
             
         except Exception as e:
             self.islem_yapiyor = False
-            self.goruntu_alani.clear_widgets()
-            self.goruntu_alani.add_widget(Label(text=f'Sayfa Hatasi:\n{str(e)}'))
+            self.lbl_sayfa.text = "Hata Olustu"
+            print(f'Sayfa Hatasi: {str(e)}')
 
     def onceki_sayfa(self, instance):
         if self.mevcut_sayfa > 0 and not self.islem_yapiyor:
@@ -223,7 +213,6 @@ class PDFEkrani(Screen):
         if self.islem_yapiyor: return 
         if self.pdf_renderer:
             self.pdf_renderer.kapat()
-        # Temizlik Operasyonu: Cihaz hafızasını çöplüğe çevirmemek için eski sayfaları sileriz
         try:
             for f in os.listdir(DERSLER_PATH):
                 if f.startswith('.cache_page_') and f.endswith('.png'):
