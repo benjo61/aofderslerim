@@ -1,13 +1,13 @@
 import os, io
 from kivy.app import App
-from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
+from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.image import Image
-from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.core.image import Image as CoreImage
+from kivy.metrics import dp
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -23,30 +23,86 @@ def get_pdfs(yol):
     except:
         return []
 
-class PDFScreen(Screen):
+def ust_bar(baslik, geri_func=None):
+    bar = BoxLayout(size_hint_y=None, height=dp(56),
+        padding=[dp(10), dp(8)], spacing=dp(10))
+    bar.canvas.before.clear()
+    from kivy.graphics import Color, Rectangle
+    with bar.canvas.before:
+        Color(0.2, 0.5, 0.8, 1)
+        bar.rect = Rectangle(pos=bar.pos, size=bar.size)
+    bar.bind(pos=lambda *a: setattr(bar.rect, 'pos', bar.pos))
+    bar.bind(size=lambda *a: setattr(bar.rect, 'size', bar.size))
+    if geri_func:
+        geri = Button(text='←', size_hint_x=None, width=dp(50),
+            background_color=(0.1, 0.4, 0.7, 1), font_size=dp(22))
+        geri.bind(on_press=lambda x: geri_func())
+        bar.add_widget(geri)
+    lbl = Label(text=baslik, font_size=dp(18), bold=True, halign='left',
+        text_size=(None, None))
+    bar.add_widget(lbl)
+    return bar
+
+def liste_btn(metin, callback):
+    btn = Button(
+        text=metin,
+        size_hint_y=None,
+        height=dp(65),
+        font_size=dp(15),
+        halign='left',
+        padding_x=dp(15),
+        background_color=(0.15, 0.15, 0.15, 1),
+        background_normal=''
+    )
+    btn.bind(on_press=lambda x: callback())
+    return btn
+
+def ayrac():
+    from kivy.uix.widget import Widget
+    from kivy.graphics import Color, Rectangle
+    w = Widget(size_hint_y=None, height=dp(1))
+    with w.canvas:
+        Color(0.3, 0.3, 0.3, 1)
+        Rectangle(pos=w.pos, size=w.size)
+    w.bind(pos=lambda *a: w.canvas.clear() or
+        w.canvas.__class__.clear(w.canvas) or None)
+    return w
+
+class ListeEkrani(Screen):
+    def __init__(self, baslik, ogeler, tikla_func, geri_func=None, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        layout.add_widget(ust_bar(baslik, geri_func))
+        scroll = ScrollView()
+        ic = BoxLayout(orientation='vertical',
+            size_hint_y=None, spacing=dp(1), padding=[0, dp(5)])
+        ic.bind(minimum_height=ic.setter('height'))
+        if not ogeler:
+            ic.add_widget(Label(text='Klasör boş!',
+                size_hint_y=None, height=dp(60)))
+        for oge in ogeler:
+            btn = liste_btn('   📁  ' + oge if not oge.endswith('.pdf')
+                else '   📄  ' + oge[:-4], lambda o=oge: tikla_func(o))
+            ic.add_widget(btn)
+            ic.add_widget(ayrac())
+        scroll.add_widget(ic)
+        layout.add_widget(scroll)
+        self.add_widget(layout)
+
+class PDFEkrani(Screen):
     def __init__(self, pdf_yol, geri_func, **kwargs):
         super().__init__(**kwargs)
         layout = BoxLayout(orientation='vertical')
-
-        ust = BoxLayout(size_hint_y=None, height=60, padding=[5,5], spacing=5)
-        geri_btn = Button(text='← Geri', size_hint_x=None, width=120)
-        geri_btn.bind(on_press=lambda x: geri_func())
-        baslik = Label(text=os.path.basename(pdf_yol)[:-4], font_size=13)
-        ust.add_widget(geri_btn)
-        ust.add_widget(baslik)
-        layout.add_widget(ust)
-
+        layout.add_widget(ust_bar(os.path.basename(pdf_yol)[:-4], geri_func))
         scroll = ScrollView()
         sayfa_layout = BoxLayout(orientation='vertical',
-            size_hint_y=None, spacing=5, padding=[5,5])
+            size_hint_y=None, spacing=dp(5), padding=[dp(5), dp(5)])
         sayfa_layout.bind(minimum_height=sayfa_layout.setter('height'))
-
         try:
             import fitz
             doc = fitz.open(pdf_yol)
             for i in range(len(doc)):
-                sayfa = doc[i]
-                pix = sayfa.get_pixmap(matrix=fitz.Matrix(2, 2))
+                pix = doc[i].get_pixmap(matrix=fitz.Matrix(2, 2))
                 buf = io.BytesIO(pix.tobytes('png'))
                 core_img = CoreImage(buf, ext='png')
                 img = Image(texture=core_img.texture,
@@ -56,64 +112,10 @@ class PDFScreen(Screen):
         except Exception as e:
             sayfa_layout.add_widget(Label(
                 text=f'PDF açılamadı:\n{str(e)}',
-                size_hint_y=None, height=200))
-
+                size_hint_y=None, height=dp(150)))
         scroll.add_widget(sayfa_layout)
         layout.add_widget(scroll)
         self.add_widget(layout)
-
-class AnaSayfa(Screen):
-    def __init__(self, pdf_ac_func, **kwargs):
-        super().__init__(**kwargs)
-        tp = TabbedPanel(do_default_tab=False, tab_width=200)
-        siniflar = get_dirs(DERSLER_PATH)
-
-        if not siniflar:
-            self.add_widget(Label(text='DERSLERİM klasörü boş!'))
-            return
-
-        for sinif in siniflar:
-            sinif_tab = TabbedPanelItem(text=sinif)
-            sinif_yolu = os.path.join(DERSLER_PATH, sinif)
-            donem_tp = TabbedPanel(do_default_tab=False, tab_width=200)
-
-            for donem in get_dirs(sinif_yolu):
-                donem_tab = TabbedPanelItem(text=donem)
-                donem_yolu = os.path.join(sinif_yolu, donem)
-                ders_tp = TabbedPanel(do_default_tab=False, tab_width=200)
-
-                for ders in get_dirs(donem_yolu):
-                    ders_tab = TabbedPanelItem(text=ders)
-                    ders_yolu = os.path.join(donem_yolu, ders)
-                    scroll = ScrollView()
-                    layout = BoxLayout(orientation='vertical',
-                        size_hint_y=None, padding=[10,10], spacing=8)
-                    layout.bind(minimum_height=layout.setter('height'))
-
-                    pdfler = get_pdfs(ders_yolu)
-                    if not pdfler:
-                        layout.add_widget(Label(
-                            text='PDF bulunamadı.',
-                            size_hint_y=None, height=60))
-                    else:
-                        for pdf in pdfler:
-                            btn = Button(text=pdf[:-4],
-                                size_hint_y=None, height=75, font_size=13)
-                            pdf_yol = os.path.join(ders_yolu, pdf)
-                            btn.bind(on_press=lambda x, p=pdf_yol: pdf_ac_func(p))
-                            layout.add_widget(btn)
-
-                    scroll.add_widget(layout)
-                    ders_tab.add_widget(scroll)
-                    ders_tp.add_widget(ders_tab)
-
-                donem_tab.add_widget(ders_tp)
-                donem_tp.add_widget(donem_tab)
-
-            sinif_tab.add_widget(donem_tp)
-            tp.add_widget(sinif_tab)
-
-        self.add_widget(tp)
 
 class DerslerApp(App):
     def build(self):
@@ -122,23 +124,94 @@ class DerslerApp(App):
             request_permissions([
                 Permission.READ_EXTERNAL_STORAGE,
                 Permission.WRITE_EXTERNAL_STORAGE,
-            ], lambda *x: None)
+            ])
         except:
             pass
-
+        try:
+            from jnius import autoclass
+            Environment = autoclass('android.os.Environment')
+            if not Environment.isExternalStorageManager():
+                Intent = autoclass('android.content.Intent')
+                Settings = autoclass('android.provider.Settings')
+                Uri = autoclass('android.net.Uri')
+                context = autoclass('org.kivy.android.PythonActivity').mActivity
+                intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                intent.setData(Uri.parse('package:' + context.getPackageName()))
+                context.startActivity(intent)
+        except:
+            pass
         self.sm = ScreenManager()
-        ana = AnaSayfa(pdf_ac_func=self.pdf_ac, name='ana')
-        self.sm.add_widget(ana)
+        self.gecmis = []
+        self.sinif_ekrani()
         return self.sm
 
-    def pdf_ac(self, yol):
-        if self.sm.has_screen('pdf'):
-            self.sm.remove_widget(self.sm.get_screen('pdf'))
-        pdf_screen = PDFScreen(pdf_yol=yol, geri_func=self.geri_don, name='pdf')
-        self.sm.add_widget(pdf_screen)
-        self.sm.current = 'pdf'
+    def ekran_temizle(self):
+        for s in list(self.sm.screens):
+            self.sm.remove_widget(s)
 
-    def geri_don(self):
-        self.sm.current = 'ana'
+    def sinif_ekrani(self):
+        self.ekran_temizle()
+        siniflar = get_dirs(DERSLER_PATH)
+        ekran = ListeEkrani(
+            baslik='AÖF Derslerim',
+            ogeler=siniflar,
+            tikla_func=self.donem_ekrani,
+            name='sinif'
+        )
+        self.sm.add_widget(ekran)
+        self.sm.current = 'sinif'
+
+    def donem_ekrani(self, sinif):
+        self.secili_sinif = sinif
+        self.ekran_temizle()
+        yol = os.path.join(DERSLER_PATH, sinif)
+        ekran = ListeEkrani(
+            baslik=sinif,
+            ogeler=get_dirs(yol),
+            tikla_func=self.ders_ekrani,
+            geri_func=self.sinif_ekrani,
+            name='donem'
+        )
+        self.sm.add_widget(ekran)
+        self.sm.current = 'donem'
+
+    def ders_ekrani(self, donem):
+        self.secili_donem = donem
+        self.ekran_temizle()
+        yol = os.path.join(DERSLER_PATH, self.secili_sinif, donem)
+        ekran = ListeEkrani(
+            baslik=donem,
+            ogeler=get_dirs(yol),
+            tikla_func=self.pdf_liste_ekrani,
+            geri_func=lambda: self.donem_ekrani(self.secili_sinif),
+            name='ders'
+        )
+        self.sm.add_widget(ekran)
+        self.sm.current = 'ders'
+
+    def pdf_liste_ekrani(self, ders):
+        self.secili_ders = ders
+        self.ekran_temizle()
+        yol = os.path.join(DERSLER_PATH, self.secili_sinif, self.secili_donem, ders)
+        pdfler = get_pdfs(yol)
+        ekran = ListeEkrani(
+            baslik=ders,
+            ogeler=pdfler,
+            tikla_func=lambda pdf: self.pdf_ac(os.path.join(yol, pdf)),
+            geri_func=lambda: self.ders_ekrani(self.secili_donem),
+            name='pdfler'
+        )
+        self.sm.add_widget(ekran)
+        self.sm.current = 'pdfler'
+
+    def pdf_ac(self, yol):
+        self.ekran_temizle()
+        ekran = PDFEkrani(
+            pdf_yol=yol,
+            geri_func=lambda: self.pdf_liste_ekrani(self.secili_ders),
+            name='pdf'
+        )
+        self.sm.add_widget(ekran)
+        self.sm.current = 'pdf'
 
 DerslerApp().run()
