@@ -7,6 +7,7 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
+from kivy.uix.popup import Popup
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -108,26 +109,35 @@ class DerslerApp(App):
         self.sm.current = 'pdfler'
 
     def pdf_ac(self, yol):
-        # İŞTE BÜTÜN KANSERİ BİTİREN NATIVE ANDROID ÇAĞRISI
         try:
             from jnius import autoclass, cast
             Intent = autoclass('android.content.Intent')
             Uri = autoclass('android.net.Uri')
+            File = autoclass('java.io.File')
+            
+            # 1. HAYAT KURTARICI DÜZELTME: JNI'da iç sınıflar $ işareti ile çağrılır!
+            Builder = autoclass('android.os.StrictMode$VmPolicy$Builder')
             StrictMode = autoclass('android.os.StrictMode')
-
-            # FileUriExposedException hatasını engellemek için Android güvenlik duvarını deliyoruz
-            builder = StrictMode.VmPolicy.Builder()
+            
+            # Güvenlik duvarını sorunsuz devredışı bırakıyoruz
+            builder = Builder()
             StrictMode.setVmPolicy(builder.build())
-
+            
             intent = Intent(Intent.ACTION_VIEW)
-            uri = Uri.parse("file://" + yol)
+            
+            # 2. GÜVENLİ DOSYA YOLU: Boşlukları ve Türkçe karakterleri tolere eder
+            f = File(yol)
+            uri = Uri.fromFile(f)
+            
             intent.setDataAndType(uri, "application/pdf")
             intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK)
-
+            
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             currentActivity = cast('android.app.Activity', PythonActivity.mActivity)
             currentActivity.startActivity(intent)
+            
         except Exception as e:
-            print("Native PDF Hatası:", str(e))
+            # 3. KÖRLÜĞE SON: Sistem itiraz ederse artık sessizce ölmeyecek, suratımıza çarpacak
+            Popup(title='Sistem Hatasi', content=Label(text=str(e), text_size=(dp(250), None)), size_hint=(0.8, 0.4)).open()
 
 DerslerApp().run()
