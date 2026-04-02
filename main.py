@@ -10,7 +10,6 @@ from kivy.core.image import Image as CoreImage
 from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
-from kivy.core.window import Window
 from kivy.uix.scatter import Scatter
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
@@ -42,10 +41,8 @@ def liste_btn(metin, callback):
     btn.bind(on_press=lambda x: callback())
     return btn
 
-# --- JNI DARBOĞAZI YOK EDİLMİŞ MOTOR ---
 class PDFRenderer:
     def __init__(self, pdf_yol):
-        # Tüm Java sınıflarını SADECE BİR KEZ çekiyoruz
         from jnius import autoclass
         self.PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
         self.ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
@@ -63,7 +60,6 @@ class PDFRenderer:
         self.sayfa_sayisi = self.renderer.getPageCount()
 
     def sayfa_render(self, sayfa_no, zoom=2.0):
-        # Burada artık JNI (autoclass) araması YOK! İşlemci uçuşa geçer.
         bitmap = None
         out = None
         try:
@@ -108,52 +104,81 @@ class PDFEkrani(Screen):
         baslik = os.path.basename(pdf_yol)[:-4]
         self.layout.add_widget(ust_bar(baslik, self.geri_git))
         
-        self.goruntu_alani = BoxLayout(orientation='vertical')
+        # Kapak Alanı
+        self.goruntu_alani = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))
         self.layout.add_widget(self.goruntu_alani)
         
-        alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
-        with alt_bar.canvas.before:
+        # Alt Sayfalama Barı
+        self.alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
+        with self.alt_bar.canvas.before:
             Color(0.1, 0.1, 0.1, 1)
-            self.alt_rect = Rectangle(pos=alt_bar.pos, size=alt_bar.size)
-        alt_bar.bind(pos=lambda *a: setattr(self.alt_rect, 'pos', alt_bar.pos))
-        alt_bar.bind(size=lambda *a: setattr(self.alt_rect, 'size', alt_bar.size))
+            self.alt_rect = Rectangle(pos=self.alt_bar.pos, size=self.alt_bar.size)
+        self.alt_bar.bind(pos=lambda *a: setattr(self.alt_rect, 'pos', self.alt_bar.pos))
+        self.alt_bar.bind(size=lambda *a: setattr(self.alt_rect, 'size', self.alt_bar.size))
         
         self.btn_onceki = Button(text='<< ONCEKI', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
         self.btn_onceki.bind(on_press=self.onceki_sayfa)
         
-        self.lbl_sayfa = Label(text='Hazirlaniyor...', bold=True)
+        self.lbl_sayfa = Label(text='-', bold=True)
         
         self.btn_sonraki = Button(text='SONRAKI >>', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
         self.btn_sonraki.bind(on_press=self.sonraki_sayfa)
         
-        alt_bar.add_widget(self.btn_onceki)
-        alt_bar.add_widget(self.lbl_sayfa)
-        alt_bar.add_widget(self.btn_sonraki)
+        self.alt_bar.add_widget(self.btn_onceki)
+        self.alt_bar.add_widget(self.lbl_sayfa)
+        self.alt_bar.add_widget(self.btn_sonraki)
         
-        self.layout.add_widget(alt_bar)
         self.add_widget(self.layout)
 
     def on_enter(self):
-        Clock.schedule_once(self.baslat, 0.4)
+        # Ekrana girer girmez motoru ÇALIŞTIRMIYORUZ. Sadece başlat butonunu koyuyoruz.
+        self.goruntu_alani.clear_widgets()
+        
+        uyari_lbl = Label(text="Dokunmatik çökmesini önlemek için\nlütfen aşağıdaki butona basın.", halign='center', color=(0.7,0.7,0.7,1))
+        
+        self.btn_baslat = Button(
+            text="KİTABI YÜKLE VE AÇ", 
+            font_size=dp(20), bold=True,
+            size_hint=(1, None), height=dp(100),
+            background_color=(0.1, 0.6, 0.2, 1)
+        )
+        self.btn_baslat.bind(on_press=self.manuel_tetikleyici)
+        
+        bosluk = BoxLayout() # Ortalamak için
+        self.goruntu_alani.add_widget(uyari_lbl)
+        self.goruntu_alani.add_widget(self.btn_baslat)
+        self.goruntu_alani.add_widget(bosluk)
 
-    def baslat(self, dt):
+    def manuel_tetikleyici(self, instance):
+        # Butona basıldı. Butonu kilitliyoruz.
+        self.btn_baslat.disabled = True
+        self.btn_baslat.text = "Motor Isınıyor...\nLütfen Bekleyin"
+        self.btn_baslat.background_color = (0.5, 0.5, 0.5, 1)
+        
+        # HAYAT KURTARAN NOKTA: Parmağın ekrandan tam kalkması ve 
+        # Android'in bunu algılaması için 0.6 saniye bekliyoruz.
+        Clock.schedule_once(self.motoru_kur, 0.6)
+
+    def motoru_kur(self, dt):
         try:
             self.pdf_renderer = PDFRenderer(self.pdf_yol)
-            self.sayfa_goster(self.mevcut_sayfa)
+            self.layout.add_widget(self.alt_bar) # Alt barı şimdi gösteriyoruz
+            self.sayfa_hazirla(self.mevcut_sayfa)
         except Exception as e:
             self.goruntu_alani.clear_widgets()
             self.goruntu_alani.add_widget(Label(text=f'Acilamadi:\n{str(e)}'))
 
-    def sayfa_goster(self, sayfa_no):
+    def sayfa_hazirla(self, sayfa_no):
         if not self.pdf_renderer: return
         self.islem_yapiyor = True
         self.btn_onceki.disabled = True
         self.btn_sonraki.disabled = True
         
         self.goruntu_alani.clear_widgets()
-        self.goruntu_alani.add_widget(Label(text="Sayfa Isleniyor... \nLutfen Dokunmayin!"))
+        self.goruntu_alani.add_widget(Label(text="Sayfa Çiziliyor...\nLütfen Dokunmayın!"))
         
-        Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.2)
+        # Sayfa geçişlerinde de dokunmatik temizliği için 0.4s bekliyoruz
+        Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.4)
 
     def _render_ve_bas(self, sayfa_no):
         try:
@@ -185,12 +210,12 @@ class PDFEkrani(Screen):
     def onceki_sayfa(self, instance):
         if self.mevcut_sayfa > 0 and not self.islem_yapiyor:
             self.mevcut_sayfa -= 1
-            self.sayfa_goster(self.mevcut_sayfa)
+            self.sayfa_hazirla(self.mevcut_sayfa)
 
     def sonraki_sayfa(self, instance):
         if self.pdf_renderer and self.mevcut_sayfa < self.pdf_renderer.sayfa_sayisi - 1 and not self.islem_yapiyor:
             self.mevcut_sayfa += 1
-            self.sayfa_goster(self.mevcut_sayfa)
+            self.sayfa_hazirla(self.mevcut_sayfa)
 
     def geri_git(self):
         if self.islem_yapiyor: return 
