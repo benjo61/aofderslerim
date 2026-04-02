@@ -1,4 +1,4 @@
-import os, io, fitz
+import os, io
 from kivy.app import App
 from kivy.uix.tabbedpanel import TabbedPanel, TabbedPanelItem
 from kivy.uix.scrollview import ScrollView
@@ -8,7 +8,6 @@ from kivy.uix.label import Label
 from kivy.uix.image import Image
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.core.image import Image as CoreImage
-from android.permissions import request_permissions, Permission
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -43,6 +42,7 @@ class PDFScreen(Screen):
         sayfa_layout.bind(minimum_height=sayfa_layout.setter('height'))
 
         try:
+            import fitz
             doc = fitz.open(pdf_yol)
             for i in range(len(doc)):
                 sayfa = doc[i]
@@ -55,8 +55,8 @@ class PDFScreen(Screen):
             doc.close()
         except Exception as e:
             sayfa_layout.add_widget(Label(
-                text=f'PDF açılamadı: {str(e)}',
-                size_hint_y=None, height=100))
+                text=f'PDF açılamadı:\n{str(e)}',
+                size_hint_y=None, height=200))
 
         scroll.add_widget(sayfa_layout)
         layout.add_widget(scroll)
@@ -117,13 +117,18 @@ class AnaSayfa(Screen):
 
 class DerslerApp(App):
     def build(self):
+        try:
+            from android.permissions import request_permissions, Permission
+            request_permissions([
+                Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE,
+            ], lambda *x: None)
+        except:
+            pass
+
         self.sm = ScreenManager()
-        self.ana = AnaSayfa(pdf_ac_func=self.pdf_ac, name='ana')
-        self.sm.add_widget(self.ana)
-        request_permissions([
-            Permission.READ_EXTERNAL_STORAGE,
-            Permission.WRITE_EXTERNAL_STORAGE,
-        ], lambda *x: None)
+        ana = AnaSayfa(pdf_ac_func=self.pdf_ac, name='ana')
+        self.sm.add_widget(ana)
         return self.sm
 
     def pdf_ac(self, yol):
