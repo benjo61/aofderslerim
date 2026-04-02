@@ -8,59 +8,78 @@ from kivy.uix.label import Label
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
+def get_dirs(yol):
+    try:
+        return sorted([f for f in os.listdir(yol)
+            if os.path.isdir(os.path.join(yol, f))])
+    except:
+        return []
+
+def get_pdfs(yol):
+    try:
+        return sorted([f for f in os.listdir(yol)
+            if f.lower().endswith('.pdf')])
+    except:
+        return []
+
 class DerslerApp(App):
     def build(self):
+        # SINIF sekmeler
         tp = TabbedPanel(do_default_tab=False)
-        try:
-            siniflar = sorted([f for f in os.listdir(DERSLER_PATH)
-                if os.path.isdir(os.path.join(DERSLER_PATH, f))])
-        except Exception as e:
-            return Label(text=f'Hata: {str(e)}')
+        siniflar = get_dirs(DERSLER_PATH)
+
+        if not siniflar:
+            return Label(text='DERSLERİM klasörü boş veya okunamadı!')
 
         for sinif in siniflar:
             sinif_tab = TabbedPanelItem(text=sinif)
             sinif_yolu = os.path.join(DERSLER_PATH, sinif)
 
-            ic_tp = TabbedPanel(do_default_tab=False)
-
-            try:
-                donemler = sorted([f for f in os.listdir(sinif_yolu)
-                    if os.path.isdir(os.path.join(sinif_yolu, f))])
-            except:
-                donemler = []
+            # DÖNEM sekmeler
+            donem_tp = TabbedPanel(do_default_tab=False)
+            donemler = get_dirs(sinif_yolu)
 
             for donem in donemler:
                 donem_tab = TabbedPanelItem(text=donem)
                 donem_yolu = os.path.join(sinif_yolu, donem)
 
-                scroll = ScrollView()
-                layout = BoxLayout(orientation='vertical',
-                    size_hint_y=None, padding=[10,10], spacing=8)
-                layout.bind(minimum_height=layout.setter('height'))
+                # DERS sekmeler
+                ders_tp = TabbedPanel(do_default_tab=False)
+                dersler = get_dirs(donem_yolu)
 
-                try:
-                    pdfler = sorted([f for f in os.listdir(donem_yolu)
-                        if f.lower().endswith('.pdf')])
-                except:
-                    pdfler = []
+                for ders in dersler:
+                    ders_tab = TabbedPanelItem(text=ders)
+                    ders_yolu = os.path.join(donem_yolu, ders)
 
-                if not pdfler:
-                    layout.add_widget(Label(
-                        text='PDF bulunamadı.',
-                        size_hint_y=None, height=60))
-                else:
-                    for pdf in pdfler:
-                        btn = Button(text=pdf[:-4],
-                            size_hint_y=None, height=75, font_size=15)
-                        pdf_yol = os.path.join(donem_yolu, pdf)
-                        btn.bind(on_press=lambda x, p=pdf_yol: self.pdf_ac(p))
-                        layout.add_widget(btn)
+                    scroll = ScrollView()
+                    layout = BoxLayout(orientation='vertical',
+                        size_hint_y=None, padding=[10,10], spacing=8)
+                    layout.bind(minimum_height=layout.setter('height'))
 
-                scroll.add_widget(layout)
-                donem_tab.add_widget(scroll)
-                ic_tp.add_widget(donem_tab)
+                    pdfler = get_pdfs(ders_yolu)
 
-            sinif_tab.add_widget(ic_tp)
+                    if not pdfler:
+                        layout.add_widget(Label(
+                            text='PDF bulunamadı.',
+                            size_hint_y=None, height=60))
+                    else:
+                        for pdf in pdfler:
+                            btn = Button(text=pdf[:-4],
+                                size_hint_y=None, height=75,
+                                font_size=13, halign='center',
+                                text_size=(None, None))
+                            pdf_yol = os.path.join(ders_yolu, pdf)
+                            btn.bind(on_press=lambda x, p=pdf_yol: self.pdf_ac(p))
+                            layout.add_widget(btn)
+
+                    scroll.add_widget(layout)
+                    ders_tab.add_widget(scroll)
+                    ders_tp.add_widget(ders_tab)
+
+                donem_tab.add_widget(ders_tp)
+                donem_tp.add_widget(donem_tab)
+
+            sinif_tab.add_widget(donem_tp)
             tp.add_widget(sinif_tab)
 
         return tp
