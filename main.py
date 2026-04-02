@@ -1,4 +1,4 @@
-import os, io
+import os, io, threading
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
@@ -59,6 +59,7 @@ class PDFRenderer:
         self.pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
         self.renderer = PdfRenderer(self.pfd)
         self.sayfa_sayisi = self.renderer.getPageCount()
+        self.kilit = threading.Lock()  # MUTEX
 
     def sayfa_render(self, sayfa_no):
         from jnius import autoclass
@@ -68,18 +69,20 @@ class PDFRenderer:
         PaintColor = autoclass('android.graphics.Color')
         ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
         CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-        sayfa = self.renderer.openPage(sayfa_no)
-        w = sayfa.getWidth() * 2
-        h = sayfa.getHeight() * 2
-        bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
-        canvas = Canvas(bitmap)
-        canvas.drawColor(PaintColor.WHITE)
-        sayfa.render(bitmap, None, None, 1)
-        sayfa.close()
-        out = ByteArrayOutputStream()
-        bitmap.compress(CompressFormat.PNG, 90, out)
-        buf = io.BytesIO(bytes(out.toByteArray()))
-        return buf, w, h
+
+        with self.kilit:  # Aynı anda sadece 1 sayfa
+            sayfa = self.renderer.openPage(sayfa_no)
+            w = sayfa.getWidth() * 2
+            h = sayfa.getHeight() * 2
+            bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+            canvas = Canvas(bitmap)
+            canvas.drawColor(PaintColor.WHITE)
+            sayfa.render(bitmap, None, None, 1)
+            sayfa.close()
+            out = ByteArrayOutputStream()
+            bitmap.compress(CompressFormat.PNG, 90, out)
+            buf = io.BytesIO(bytes(out.toByteArray()))
+            return buf, w, h
 
     def kapat(self):
         try:
@@ -98,6 +101,7 @@ class SayfaWidget(BoxLayout):
         self.size_hint_y = None
         self.height = dp(500)
         self.yuklendi = False
+        self.yukleniyor = False
         self.img_widget = None
         self.base_h = dp(500)
         self.add_widget(Label(
@@ -106,30 +110,38 @@ class SayfaWidget(BoxLayout):
             color=(0.5, 0.5, 0.5, 1)))
 
     def yukle(self):
-        if self.yuklendi:
+        if self.yuklendi or self.yukleniyor:
             return
-        self.yuklendi = True
+        self.yukleniyor = True
+        t = threading.Thread(target=self._yukle_thread)
+        t.daemon = True
+        t.start()
+
+    def _yukle_thread(self):
         try:
             buf, w, h = self.pdf_renderer.sayfa_render(self.sayfa_no)
-            core_img = CoreImage(buf, ext='png')
-            zoom = self.zoom_ref[0]
-            goster_h = (Window.width * zoom) * (h / w)
-            self.base_h = Window.width * (h / w)
-            img = Image(
-                texture=core_img.texture,
-                size_hint_y=None,
-                height=goster_h,
-                allow_stretch=True,
-                keep_ratio=True)
-            self.img_widget = img
-            self.clear_widgets()
-            self.height = goster_h
-            self.add_widget(img)
+            Clock.schedule_once(lambda dt: self._goster(buf, w, h), 0)
         except Exception as e:
-            self.clear_widgets()
-            self.add_widget(Label(
-                text=f'Hata: {str(e)}',
-                size_hint_y=None, height=dp(80)))
+            Clock.schedule_once(lambda dt: self._hata(str(e)), 0)
+
+    def _goster(self, buf, w, h):
+        zoom = self.zoom_ref[0]
+        self.base_h = Window.width * (h / w)
+        goster_h = self.base_h * zoom
+        core_img = CoreImage(buf, ext='png')
+        img = Image(texture=core_img.texture,
+            size_hint_y=None, height=goster_h,
+            allow_stretch=True, keep_ratio=True)
+        self.img_widget = img
+        self.clear_widgets()
+        self.height = goster_h
+        self.add_widget(img)
+        self.yuklendi = True
+
+    def _hata(self, msg):
+        self.clear_widgets()
+        self.add_widget(Label(text=f'Hata: {msg}',
+            size_hint_y=None, height=dp(80)))
 
     def zoom_guncelle(self, zoom):
         if self.img_widget:
@@ -141,7 +153,7 @@ class LazyPDFScroll(ScrollView):
     def __init__(self, pdf_renderer, **kwargs):
         super().__init__(**kwargs)
         self.pdf_renderer = pdf_renderer
-        self.zoom_ref = [1.0]  # başlangıç zoom
+        self.zoom_ref = [1.0]
         self.sayfalar = []
         self.ic = BoxLayout(orientation='vertical',
             size_hint_y=None, spacing=dp(6),
@@ -161,7 +173,7 @@ class LazyPDFScroll(ScrollView):
             self.sayfalar[i].yukle()
 
     def scroll_degisti(self, *args):
-        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.15)
+        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.2)
 
     def gorunen_yukle(self):
         if not self.sayfalar:
@@ -169,7 +181,7 @@ class LazyPDFScroll(ScrollView):
         toplam = len(self.sayfalar)
         oran = 1 - self.scroll_y
         orta = int(oran * toplam)
-        for i in range(max(0, orta - 2), min(toplam, orta + 5)):
+        for i in range(max(0, orta - 1), min(toplam, orta + 4)):
             self.sayfalar[i].yukle()
 
     def zoom_yap(self, delta):
@@ -185,39 +197,30 @@ class PDFEkrani(Screen):
         layout = BoxLayout(orientation='vertical')
         baslik = os.path.basename(pdf_yol)[:-4]
         layout.add_widget(ust_bar(baslik, self.geri_git))
-
         try:
             self.pdf_renderer = PDFRenderer(pdf_yol)
             self.lazy_scroll = LazyPDFScroll(pdf_renderer=self.pdf_renderer)
-
-            # Zoom butonları
-            zoom_bar = BoxLayout(size_hint_y=None, height=dp(50),
-                spacing=dp(5), padding=[dp(5), dp(5)])
+            zoom_bar = BoxLayout(size_hint_y=None, height=dp(55),
+                spacing=dp(5), padding=[dp(5), dp(8)])
             with zoom_bar.canvas.before:
                 Color(0.1, 0.1, 0.1, 1)
-                rect2 = Rectangle(pos=zoom_bar.pos, size=zoom_bar.size)
-            zoom_bar.bind(pos=lambda *a: setattr(rect2, 'pos', zoom_bar.pos))
-            zoom_bar.bind(size=lambda *a: setattr(rect2, 'size', zoom_bar.size))
-
-            btn_kucult = Button(text='  −  ', font_size=dp(24),
+                r2 = Rectangle(pos=zoom_bar.pos, size=zoom_bar.size)
+            zoom_bar.bind(pos=lambda *a: setattr(r2, 'pos', zoom_bar.pos))
+            zoom_bar.bind(size=lambda *a: setattr(r2, 'size', zoom_bar.size))
+            btn_k = Button(text='−', font_size=dp(26),
                 background_color=(0.2, 0.5, 0.8, 1), background_normal='')
-            btn_buyut = Button(text='  +  ', font_size=dp(24),
+            btn_b = Button(text='+', font_size=dp(26),
                 background_color=(0.2, 0.5, 0.8, 1), background_normal='')
-            self.zoom_lbl = Label(text='%100', font_size=dp(16), size_hint_x=0.4)
-
-            btn_kucult.bind(on_press=lambda x: self.zoom(-0.15))
-            btn_buyut.bind(on_press=lambda x: self.zoom(0.15))
-
-            zoom_bar.add_widget(btn_kucult)
+            self.zoom_lbl = Label(text='%100', font_size=dp(16), size_hint_x=0.5)
+            btn_k.bind(on_press=lambda x: self.zoom(-0.15))
+            btn_b.bind(on_press=lambda x: self.zoom(0.15))
+            zoom_bar.add_widget(btn_k)
             zoom_bar.add_widget(self.zoom_lbl)
-            zoom_bar.add_widget(btn_buyut)
-
+            zoom_bar.add_widget(btn_b)
             layout.add_widget(self.lazy_scroll)
             layout.add_widget(zoom_bar)
-
         except Exception as e:
             layout.add_widget(Label(text=f'PDF acilamadi:\n{str(e)}'))
-
         self.add_widget(layout)
 
     def zoom(self, delta):
