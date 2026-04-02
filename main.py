@@ -1,4 +1,4 @@
-import os, io, threading, queue
+import os, io
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
@@ -41,82 +41,91 @@ def liste_btn(metin, callback):
     btn.bind(on_press=lambda x: callback())
     return btn
 
-# --- İZOLE JNI İŞÇİ PARÇACIĞI ---
-class PDFWorker(threading.Thread):
-    def __init__(self, pdf_yol):
-        super().__init__()
-        self.pdf_yol = pdf_yol
-        self.q = queue.Queue()
-        self.calisiyor = True
-        self.daemon = True
+# --- RAM DOSTU AKILLI KUYRUK MİMARİSİ ---
+class RenderKuyrugu:
+    kuyruk = []
+    isleniyor = False
 
-    def run(self):
-        try:
-            from jnius import autoclass
-            import jnius
-            jnius.attach() # Çökmemesi için Android JVM'ye kayıt oluyoruz
-            
-            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
-            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
-            File = autoclass('java.io.File')
-            Bitmap = autoclass('android.graphics.Bitmap')
-            BitmapConfig = autoclass('android.graphics.Bitmap$Config')
-            Canvas = autoclass('android.graphics.Canvas')
-            PaintColor = autoclass('android.graphics.Color')
-            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
-            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+    @classmethod
+    def siraya_al(cls, sayfalar):
+        cls.kuyruk = [s for s in sayfalar if not s.yuklendi and not s.yukleniyor]
+        if not cls.isleniyor and cls.kuyruk:
+            cls.isleniyor = True
+            Clock.schedule_once(cls.isle, 0.05)
 
-            f = File(self.pdf_yol)
-            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-            renderer = PdfRenderer(pfd)
-        except Exception as e:
-            print("Worker Başlatılamadı:", e)
+    @classmethod
+    def isle(cls, dt):
+        if not cls.kuyruk:
+            cls.isleniyor = False
             return
+        sayfa = cls.kuyruk.pop(0)
+        if not sayfa.yuklendi:
+            sayfa.gercek_yukle()
+        Clock.schedule_once(cls.isle, 0.05)
 
-        while self.calisiyor:
-            gorev = self.q.get()
-            if gorev is None:
-                break
-            sayfa_no, callback = gorev
-            
-            try:
-                sayfa = renderer.openPage(sayfa_no)
-                # Standart yüksek kalite render (Zoom artık görsel olacak)
-                w = sayfa.getWidth() * 2
-                h = sayfa.getHeight() * 2
-                bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
-                canvas = Canvas(bitmap)
-                canvas.drawColor(PaintColor.WHITE)
-                sayfa.render(bitmap, None, None, 1)
-                sayfa.close()
-                
-                out = ByteArrayOutputStream()
-                bitmap.compress(CompressFormat.PNG, 85, out)
-                byte_data = bytes(out.toByteArray())
-                
-                # Çizim bitti, sonucu Ana Thread'e paslıyoruz (Güvenli yöntem)
-                Clock.schedule_once(lambda dt, b=byte_data, w=w, h=h, cb=callback: cb(b, w, h), 0)
-            except Exception as e:
-                print("Sayfa hatasi:", e)
+    @classmethod
+    def durdur(cls):
+        cls.kuyruk = []
+        cls.isleniyor = False
+        Clock.unschedule(cls.isle)
 
+class PDFRenderer:
+    def __init__(self, pdf_yol):
+        from jnius import autoclass
+        PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
+        ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
+        File = autoclass('java.io.File')
+        f = File(pdf_yol)
+        self.pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+        self.renderer = PdfRenderer(self.pfd)
+        self.sayfa_sayisi = self.renderer.getPageCount()
+
+    def sayfa_render(self, sayfa_no):
+        from jnius import autoclass
+        Bitmap = autoclass('android.graphics.Bitmap')
+        BitmapConfig = autoclass('android.graphics.Bitmap$Config')
+        Canvas = autoclass('android.graphics.Canvas')
+        PaintColor = autoclass('android.graphics.Color')
+        ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+        CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+
+        bitmap = None
+        out = None
         try:
-            renderer.close()
-            pfd.close()
+            sayfa = self.renderer.openPage(sayfa_no)
+            w = sayfa.getWidth() * 2
+            h = sayfa.getHeight() * 2
+            
+            bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+            canvas = Canvas(bitmap)
+            canvas.drawColor(PaintColor.WHITE)
+            sayfa.render(bitmap, None, None, 1)
+            sayfa.close()
+            
+            out = ByteArrayOutputStream()
+            bitmap.compress(CompressFormat.PNG, 85, out)
+            buf = io.BytesIO(bytes(out.toByteArray()))
+            return buf, w, h
+        finally:
+            # İŞTE HAYAT KURTARAN HAMLE: Belleği manuel temizleyip çöküşü önlüyoruz
+            if bitmap:
+                try: bitmap.recycle()
+                except: pass
+            if out:
+                try: out.close()
+                except: pass
+
+    def kapat(self):
+        try:
+            self.renderer.close()
+            self.pfd.close()
         except: pass
-        jnius.detach() # Kapatırken izimizi siliyoruz
-
-    def sayfa_iste(self, sayfa_no, callback):
-        self.q.put((sayfa_no, callback))
-
-    def durdur(self):
-        self.calisiyor = False
-        self.q.put(None)
 
 class SayfaWidget(BoxLayout):
-    def __init__(self, sayfa_no, worker, zoom_ref, **kwargs):
+    def __init__(self, sayfa_no, pdf_renderer, zoom_ref, **kwargs):
         super().__init__(**kwargs)
         self.sayfa_no = sayfa_no
-        self.worker = worker
+        self.pdf_renderer = pdf_renderer
         self.zoom_ref = zoom_ref
         self.orientation = 'vertical'
         self.size_hint = (None, None)
@@ -126,28 +135,31 @@ class SayfaWidget(BoxLayout):
         self.yukleniyor = False
         self.img_widget = None
         self.base_h = dp(500)
-        self.add_widget(Label(text=f'Sayfa {sayfa_no + 1} Yükleniyor...', size_hint_y=None, height=dp(500), color=(0.5, 0.5, 0.5, 1)))
+        self.add_widget(Label(text=f'Sayfa {sayfa_no + 1} Bekleniyor...', size_hint_y=None, height=dp(500), color=(0.5, 0.5, 0.5, 1)))
 
     def gercek_yukle(self):
         if self.yuklendi or self.yukleniyor: return
         self.yukleniyor = True
-        self.worker.sayfa_iste(self.sayfa_no, self.sonucu_goster)
-
-    def sonucu_goster(self, buf, w, h):
-        core_img = CoreImage(io.BytesIO(buf), ext='png')
-        self.base_h = Window.width * (h / w)
-        goster_h = self.base_h * self.zoom_ref[0]
-        goster_w = Window.width * self.zoom_ref[0]
-        
-        img = Image(texture=core_img.texture, size_hint=(None, None), size=(goster_w, goster_h), allow_stretch=True, keep_ratio=True)
-        self.img_widget = img
-        
-        self.clear_widgets()
-        self.width = goster_w
-        self.height = goster_h
-        self.add_widget(img)
-        self.yuklendi = True
-        self.yukleniyor = False
+        try:
+            buf, w, h = self.pdf_renderer.sayfa_render(self.sayfa_no)
+            self.base_h = Window.width * (h / w)
+            goster_h = self.base_h * self.zoom_ref[0]
+            goster_w = Window.width * self.zoom_ref[0]
+            
+            core_img = CoreImage(buf, ext='png')
+            img = Image(texture=core_img.texture, size_hint=(None, None), size=(goster_w, goster_h), allow_stretch=True, keep_ratio=True)
+            self.img_widget = img
+            
+            self.clear_widgets()
+            self.width = goster_w
+            self.height = goster_h
+            self.add_widget(img)
+            self.yuklendi = True
+        except Exception as e:
+            self.clear_widgets()
+            self.add_widget(Label(text=f'Hata: {str(e)}', size_hint_y=None, height=dp(80)))
+        finally:
+            self.yukleniyor = False
 
     def zoom_guncelle(self, zoom):
         if self.img_widget:
@@ -158,10 +170,10 @@ class SayfaWidget(BoxLayout):
             self.height = yeni_h
 
 class LazyPDFScroll(ScrollView):
-    def __init__(self, worker, sayfa_sayisi, **kwargs):
+    def __init__(self, pdf_renderer, sayfa_sayisi, **kwargs):
         super().__init__(**kwargs)
-        self.worker = worker
-        self.do_scroll_x = True # Zoom olunca sağa sola kaydırma aktif
+        self.pdf_renderer = pdf_renderer
+        self.do_scroll_x = True
         self.do_scroll_y = True
         self.zoom_ref = [1.0]
         self.sayfalar = []
@@ -171,13 +183,13 @@ class LazyPDFScroll(ScrollView):
         self.ic.bind(minimum_width=self.ic.setter('width'))
         
         for i in range(sayfa_sayisi):
-            sw = SayfaWidget(sayfa_no=i, worker=worker, zoom_ref=self.zoom_ref)
+            sw = SayfaWidget(sayfa_no=i, pdf_renderer=pdf_renderer, zoom_ref=self.zoom_ref)
             self.sayfalar.append(sw)
             self.ic.add_widget(sw)
             
         self.add_widget(self.ic)
         self.bind(scroll_y=self.scroll_degisti)
-        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.5)
+        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.3)
 
     def scroll_degisti(self, *args):
         Clock.unschedule(self.gorunen_yukle_tetikle)
@@ -191,8 +203,10 @@ class LazyPDFScroll(ScrollView):
         toplam = len(self.sayfalar)
         oran = 1 - self.scroll_y
         orta = int(oran * toplam)
-        for i in range(max(0, orta - 2), min(toplam, orta + 3)):
-            self.sayfalar[i].gercek_yukle()
+        hedef_sayfalar = []
+        for i in range(max(0, orta - 1), min(toplam, orta + 2)):
+            hedef_sayfalar.append(self.sayfalar[i])
+        RenderKuyrugu.siraya_al(hedef_sayfalar)
 
     def zoom_yap(self, delta):
         self.zoom_ref[0] = max(0.5, min(3.0, self.zoom_ref[0] + delta))
@@ -204,7 +218,7 @@ class PDFEkrani(Screen):
         super().__init__(**kwargs)
         self.pdf_yol = pdf_yol
         self.geri_func = geri_func
-        self.worker = None
+        self.pdf_renderer = None
         self.lazy_scroll = None
 
         self.layout = BoxLayout(orientation='vertical')
@@ -222,23 +236,8 @@ class PDFEkrani(Screen):
     def motoru_ve_pdfi_yukle(self, dt):
         self.icerik_alani.clear_widgets()
         try:
-            # Ana thread'de hızlıca sayfa sayısını buluyoruz
-            from jnius import autoclass
-            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
-            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
-            File = autoclass('java.io.File')
-            f = File(self.pdf_yol)
-            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-            renderer = PdfRenderer(pfd)
-            sayfa_sayisi = renderer.getPageCount()
-            renderer.close()
-            pfd.close()
-
-            # İşçiyi başlatıyoruz
-            self.worker = PDFWorker(self.pdf_yol)
-            self.worker.start()
-
-            self.lazy_scroll = LazyPDFScroll(worker=self.worker, sayfa_sayisi=sayfa_sayisi)
+            self.pdf_renderer = PDFRenderer(self.pdf_yol)
+            self.lazy_scroll = LazyPDFScroll(pdf_renderer=self.pdf_renderer, sayfa_sayisi=self.pdf_renderer.sayfa_sayisi)
 
             zoom_bar = BoxLayout(size_hint_y=None, height=dp(55), spacing=dp(5), padding=[dp(5), dp(8)])
             with zoom_bar.canvas.before:
@@ -270,8 +269,9 @@ class PDFEkrani(Screen):
             self.zoom_lbl.text = f'%{yuzde}'
 
     def geri_git(self):
-        if self.worker:
-            self.worker.durdur()
+        RenderKuyrugu.durdur()
+        if self.pdf_renderer:
+            self.pdf_renderer.kapat()
         self.geri_func()
 
 class ListeEkrani(Screen):
