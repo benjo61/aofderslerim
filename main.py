@@ -1,4 +1,4 @@
-import os, io
+import os
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
@@ -6,11 +6,11 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.image import Image
-from kivy.core.image import Image as CoreImage
 from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
 from kivy.uix.scatter import Scatter
+from kivy.cache import Cache
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -31,58 +31,64 @@ def ust_bar(baslik, geri_func=None):
     bar.bind(size=lambda *a: setattr(rect, 'size', bar.size))
     if geri_func:
         geri = Button(text='< Geri', size_hint_x=None, width=dp(90), background_color=(0.1, 0.4, 0.7, 1), font_size=dp(16))
-        geri.bind(on_press=lambda x: geri_func())
+        geri.bind(on_release=lambda x: geri_func())
         bar.add_widget(geri)
     bar.add_widget(Label(text=baslik, font_size=dp(17), bold=True))
     return bar
 
 def liste_btn(metin, callback):
     btn = Button(text=metin, size_hint_y=None, height=dp(65), font_size=dp(15), halign='left', padding_x=dp(15), background_color=(0.15, 0.15, 0.15, 1), background_normal='')
-    btn.bind(on_press=lambda x: callback())
+    btn.bind(on_release=lambda x: callback())
     return btn
 
+# --- JNI KÖPRÜSÜNÜ BAYPAS EDEN DİSK MOTORU ---
 class PDFRenderer:
     def __init__(self, pdf_yol):
         from jnius import autoclass
         self.PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
         self.ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
         self.File = autoclass('java.io.File')
-        self.Bitmap = autoclass('android.graphics.Bitmap')
-        self.BitmapConfig = autoclass('android.graphics.Bitmap$Config')
-        self.Canvas = autoclass('android.graphics.Canvas')
-        self.PaintColor = autoclass('android.graphics.Color')
-        self.ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
-        self.CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-
+        
         f = self.File(pdf_yol)
         self.pfd = self.ParcelFileDescriptor.open(f, self.ParcelFileDescriptor.MODE_READ_ONLY)
         self.renderer = self.PdfRenderer(self.pfd)
         self.sayfa_sayisi = self.renderer.getPageCount()
 
-    def sayfa_render(self, sayfa_no, zoom=2.0):
+    def sayfa_render(self, sayfa_no, zoom=1.5):
+        from jnius import autoclass
+        Bitmap = autoclass('android.graphics.Bitmap')
+        BitmapConfig = autoclass('android.graphics.Bitmap$Config')
+        CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+        FileOutputStream = autoclass('java.io.FileOutputStream')
+        File = autoclass('java.io.File')
+
         bitmap = None
-        out = None
+        fos = None
+        temp_path = os.path.join(DERSLER_PATH, '.cache_page.png')
+        
         try:
             sayfa = self.renderer.openPage(sayfa_no)
             w = int(sayfa.getWidth() * zoom)
             h = int(sayfa.getHeight() * zoom)
             
-            bitmap = self.Bitmap.createBitmap(w, h, self.BitmapConfig.ARGB_8888)
-            canvas = self.Canvas(bitmap)
-            canvas.drawColor(self.PaintColor.WHITE)
+            # Resmi oluştur ve arka planı (-1 = Beyaz) renge boya (Canvas iptal, daha güvenli)
+            bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+            bitmap.eraseColor(-1)
             sayfa.render(bitmap, None, None, 1)
             sayfa.close()
             
-            out = self.ByteArrayOutputStream()
-            bitmap.compress(self.CompressFormat.PNG, 90, out)
-            buf = io.BytesIO(bytes(out.toByteArray()))
-            return buf
+            # Devasa veriyi JNI'dan geçirmek yerine doğrudan diske ışınlıyoruz!
+            cache_file = File(temp_path)
+            fos = FileOutputStream(cache_file)
+            bitmap.compress(CompressFormat.PNG, 90, fos)
+            
+            return temp_path
         finally:
             if bitmap:
                 try: bitmap.recycle()
                 except: pass
-            if out:
-                try: out.close()
+            if fos:
+                try: fos.close()
                 except: pass
 
     def kapat(self):
@@ -104,90 +110,68 @@ class PDFEkrani(Screen):
         baslik = os.path.basename(pdf_yol)[:-4]
         self.layout.add_widget(ust_bar(baslik, self.geri_git))
         
-        # Kapak Alanı
-        self.goruntu_alani = BoxLayout(orientation='vertical', padding=dp(20), spacing=dp(20))
+        self.goruntu_alani = BoxLayout(orientation='vertical')
         self.layout.add_widget(self.goruntu_alani)
         
-        # Alt Sayfalama Barı
-        self.alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
-        with self.alt_bar.canvas.before:
+        alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
+        with alt_bar.canvas.before:
             Color(0.1, 0.1, 0.1, 1)
-            self.alt_rect = Rectangle(pos=self.alt_bar.pos, size=self.alt_bar.size)
-        self.alt_bar.bind(pos=lambda *a: setattr(self.alt_rect, 'pos', self.alt_bar.pos))
-        self.alt_bar.bind(size=lambda *a: setattr(self.alt_rect, 'size', self.alt_bar.size))
+            self.alt_rect = Rectangle(pos=alt_bar.pos, size=alt_bar.size)
+        alt_bar.bind(pos=lambda *a: setattr(self.alt_rect, 'pos', alt_bar.pos))
+        alt_bar.bind(size=lambda *a: setattr(self.alt_rect, 'size', alt_bar.size))
         
         self.btn_onceki = Button(text='<< ONCEKI', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
-        self.btn_onceki.bind(on_press=self.onceki_sayfa)
+        self.btn_onceki.bind(on_release=self.onceki_sayfa)
         
-        self.lbl_sayfa = Label(text='-', bold=True)
+        self.lbl_sayfa = Label(text='Hazirlaniyor...', bold=True)
         
         self.btn_sonraki = Button(text='SONRAKI >>', font_size=dp(14), background_color=(0.2, 0.5, 0.8, 1))
-        self.btn_sonraki.bind(on_press=self.sonraki_sayfa)
+        self.btn_sonraki.bind(on_release=self.sonraki_sayfa)
         
-        self.alt_bar.add_widget(self.btn_onceki)
-        self.alt_bar.add_widget(self.lbl_sayfa)
-        self.alt_bar.add_widget(self.btn_sonraki)
+        alt_bar.add_widget(self.btn_onceki)
+        alt_bar.add_widget(self.lbl_sayfa)
+        alt_bar.add_widget(self.btn_sonraki)
         
+        self.layout.add_widget(alt_bar)
         self.add_widget(self.layout)
 
     def on_enter(self):
-        # Ekrana girer girmez motoru ÇALIŞTIRMIYORUZ. Sadece başlat butonunu koyuyoruz.
-        self.goruntu_alani.clear_widgets()
-        
-        uyari_lbl = Label(text="Dokunmatik çökmesini önlemek için\nlütfen aşağıdaki butona basın.", halign='center', color=(0.7,0.7,0.7,1))
-        
-        self.btn_baslat = Button(
-            text="KİTABI YÜKLE VE AÇ", 
-            font_size=dp(20), bold=True,
-            size_hint=(1, None), height=dp(100),
-            background_color=(0.1, 0.6, 0.2, 1)
-        )
-        self.btn_baslat.bind(on_press=self.manuel_tetikleyici)
-        
-        bosluk = BoxLayout() # Ortalamak için
-        self.goruntu_alani.add_widget(uyari_lbl)
-        self.goruntu_alani.add_widget(self.btn_baslat)
-        self.goruntu_alani.add_widget(bosluk)
+        Clock.schedule_once(self.baslat, 0.2)
 
-    def manuel_tetikleyici(self, instance):
-        # Butona basıldı. Butonu kilitliyoruz.
-        self.btn_baslat.disabled = True
-        self.btn_baslat.text = "Motor Isınıyor...\nLütfen Bekleyin"
-        self.btn_baslat.background_color = (0.5, 0.5, 0.5, 1)
-        
-        # HAYAT KURTARAN NOKTA: Parmağın ekrandan tam kalkması ve 
-        # Android'in bunu algılaması için 0.6 saniye bekliyoruz.
-        Clock.schedule_once(self.motoru_kur, 0.6)
-
-    def motoru_kur(self, dt):
+    def baslat(self, dt):
         try:
             self.pdf_renderer = PDFRenderer(self.pdf_yol)
-            self.layout.add_widget(self.alt_bar) # Alt barı şimdi gösteriyoruz
-            self.sayfa_hazirla(self.mevcut_sayfa)
+            self.sayfa_goster(self.mevcut_sayfa)
         except Exception as e:
             self.goruntu_alani.clear_widgets()
-            self.goruntu_alani.add_widget(Label(text=f'Acilamadi:\n{str(e)}'))
+            self.goruntu_alani.add_widget(Label(text=f'Motor Acilamadi:\n{str(e)}'))
 
-    def sayfa_hazirla(self, sayfa_no):
+    def sayfa_goster(self, sayfa_no):
         if not self.pdf_renderer: return
         self.islem_yapiyor = True
         self.btn_onceki.disabled = True
         self.btn_sonraki.disabled = True
         
         self.goruntu_alani.clear_widgets()
-        self.goruntu_alani.add_widget(Label(text="Sayfa Çiziliyor...\nLütfen Dokunmayın!"))
+        self.goruntu_alani.add_widget(Label(text="Sayfa Çiziliyor..."))
         
-        # Sayfa geçişlerinde de dokunmatik temizliği için 0.4s bekliyoruz
-        Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.4)
+        Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.1)
 
     def _render_ve_bas(self, sayfa_no):
         try:
-            buf = self.pdf_renderer.sayfa_render(sayfa_no, zoom=2.0)
-            core_img = CoreImage(buf, ext='png')
+            # 1. Java arka planda resmi DİSKE yazar. RAM şişmez, JNI çökmez.
+            cache_yol = self.pdf_renderer.sayfa_render(sayfa_no, zoom=1.5)
+            
+            # 2. Kivy'nin hep aynı dosyayı göstermemesi için önbelleğini siliyoruz
+            Cache.remove('kv.image')
+            Cache.remove('kv.texture')
             
             self.goruntu_alani.clear_widgets()
-            scatter = Scatter(do_rotation=False, scale_min=1.0, scale_max=5.0)
-            img = Image(texture=core_img.texture, allow_stretch=True, keep_ratio=True)
+            scatter = Scatter(do_rotation=False, scale_min=1.0, scale_max=4.0)
+            
+            # 3. Kivy sadece diskteki dosyayı okur!
+            img = Image(source=cache_yol, allow_stretch=True, keep_ratio=True)
+            img.reload()
             
             img.size = self.goruntu_alani.size
             scatter.size = self.goruntu_alani.size
@@ -205,17 +189,17 @@ class PDFEkrani(Screen):
         except Exception as e:
             self.islem_yapiyor = False
             self.goruntu_alani.clear_widgets()
-            self.goruntu_alani.add_widget(Label(text=f'Hata:\n{str(e)}'))
+            self.goruntu_alani.add_widget(Label(text=f'Sayfa Hatası:\n{str(e)}'))
 
     def onceki_sayfa(self, instance):
         if self.mevcut_sayfa > 0 and not self.islem_yapiyor:
             self.mevcut_sayfa -= 1
-            self.sayfa_hazirla(self.mevcut_sayfa)
+            self.sayfa_goster(self.mevcut_sayfa)
 
     def sonraki_sayfa(self, instance):
         if self.pdf_renderer and self.mevcut_sayfa < self.pdf_renderer.sayfa_sayisi - 1 and not self.islem_yapiyor:
             self.mevcut_sayfa += 1
-            self.sayfa_hazirla(self.mevcut_sayfa)
+            self.sayfa_goster(self.mevcut_sayfa)
 
     def geri_git(self):
         if self.islem_yapiyor: return 
