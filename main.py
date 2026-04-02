@@ -9,6 +9,7 @@ from kivy.uix.image import Image
 from kivy.core.image import Image as CoreImage
 from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
+from kivy.clock import Clock
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -47,6 +48,128 @@ def liste_btn(metin, callback):
     btn.bind(on_press=lambda x: callback())
     return btn
 
+class SayfaWidget(BoxLayout):
+    def __init__(self, sayfa_no, pdf_yol, genislik, **kwargs):
+        super().__init__(**kwargs)
+        self.sayfa_no = sayfa_no
+        self.pdf_yol = pdf_yol
+        self.orientation = 'vertical'
+        self.size_hint_y = None
+        self.height = dp(400)
+        self.yuklendi = False
+        self.placeholder = Label(
+            text=f'Sayfa {sayfa_no + 1} yukleniyor...',
+            size_hint_y=None, height=dp(400),
+            color=(0.5, 0.5, 0.5, 1))
+        self.add_widget(self.placeholder)
+
+    def yukle(self):
+        if self.yuklendi:
+            return
+        self.yuklendi = True
+        try:
+            from jnius import autoclass
+            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
+            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
+            File = autoclass('java.io.File')
+            Bitmap = autoclass('android.graphics.Bitmap')
+            BitmapConfig = autoclass('android.graphics.Bitmap$Config')
+            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
+            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
+
+            f = File(self.pdf_yol)
+            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+            renderer = PdfRenderer(pfd)
+            sayfa = renderer.openPage(self.sayfa_no)
+            w = sayfa.getWidth() * 2
+            h = sayfa.getHeight() * 2
+            bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+            sayfa.render(bitmap, None, None, 1)
+            sayfa.close()
+            renderer.close()
+            pfd.close()
+
+            out = ByteArrayOutputStream()
+            bitmap.compress(CompressFormat.PNG, 90, out)
+            buf = io.BytesIO(bytes(out.toByteArray()))
+            core_img = CoreImage(buf, ext='png')
+            img = Image(texture=core_img.texture,
+                size_hint_y=None, height=h / 2)
+            self.clear_widgets()
+            self.height = h / 2
+            self.add_widget(img)
+        except Exception as e:
+            self.clear_widgets()
+            self.add_widget(Label(
+                text=f'Hata: {str(e)}',
+                size_hint_y=None, height=dp(100)))
+
+class LazyPDFScroll(ScrollView):
+    def __init__(self, pdf_yol, sayfa_sayisi, **kwargs):
+        super().__init__(**kwargs)
+        self.pdf_yol = pdf_yol
+        self.sayfalar = []
+        self.ic = BoxLayout(orientation='vertical',
+            size_hint_y=None, spacing=dp(4), padding=[dp(4), dp(4)])
+        self.ic.bind(minimum_height=self.ic.setter('height'))
+
+        for i in range(sayfa_sayisi):
+            sw = SayfaWidget(sayfa_no=i, pdf_yol=pdf_yol, genislik=self.width)
+            self.sayfalar.append(sw)
+            self.ic.add_widget(sw)
+
+        self.add_widget(self.ic)
+        self.bind(scroll_y=self.scroll_degisti)
+        Clock.schedule_once(lambda dt: self.ilk_yukle(), 0.3)
+
+    def ilk_yukle(self):
+        # İlk 3 sayfayı hemen yükle
+        for i in range(min(3, len(self.sayfalar))):
+            self.sayfalar[i].yukle()
+
+    def scroll_degisti(self, *args):
+        Clock.schedule_once(lambda dt: self.gorunen_yukle(), 0.1)
+
+    def gorunen_yukle(self):
+        if not self.sayfalar:
+            return
+        toplam = len(self.sayfalar)
+        # scroll_y: 1=en üst, 0=en alt
+        # Hangi sayfanın görünür olduğunu hesapla
+        gorünen_oran = 1 - self.scroll_y
+        orta = int(gorünen_oran * toplam)
+        baslangic = max(0, orta - 2)
+        bitis = min(toplam, orta + 4)
+        for i in range(baslangic, bitis):
+            self.sayfalar[i].yukle()
+
+class PDFEkrani(Screen):
+    def __init__(self, pdf_yol, geri_func, **kwargs):
+        super().__init__(**kwargs)
+        layout = BoxLayout(orientation='vertical')
+        baslik = os.path.basename(pdf_yol)[:-4]
+        layout.add_widget(ust_bar(baslik, geri_func))
+
+        try:
+            from jnius import autoclass
+            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
+            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
+            File = autoclass('java.io.File')
+            f = File(pdf_yol)
+            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+            renderer = PdfRenderer(pfd)
+            sayfa_sayisi = renderer.getPageCount()
+            renderer.close()
+            pfd.close()
+
+            scroll = LazyPDFScroll(pdf_yol=pdf_yol, sayfa_sayisi=sayfa_sayisi)
+            layout.add_widget(scroll)
+
+        except Exception as e:
+            layout.add_widget(Label(text=f'PDF acilamadi:\n{str(e)}'))
+
+        self.add_widget(layout)
+
 class ListeEkrani(Screen):
     def __init__(self, baslik, ogeler, tikla_func, geri_func=None, pdf_mi=False, **kwargs):
         super().__init__(**kwargs)
@@ -63,61 +186,6 @@ class ListeEkrani(Screen):
             btn = liste_btn(ad, lambda o=oge: tikla_func(o))
             ic.add_widget(btn)
         scroll.add_widget(ic)
-        layout.add_widget(scroll)
-        self.add_widget(layout)
-
-class PDFEkrani(Screen):
-    def __init__(self, pdf_yol, geri_func, **kwargs):
-        super().__init__(**kwargs)
-        layout = BoxLayout(orientation='vertical')
-        baslik = os.path.basename(pdf_yol)[:-4]
-        layout.add_widget(ust_bar(baslik, geri_func))
-        scroll = ScrollView()
-        sayfa_layout = BoxLayout(orientation='vertical',
-            size_hint_y=None, spacing=dp(4), padding=[dp(4), dp(4)])
-        sayfa_layout.bind(minimum_height=sayfa_layout.setter('height'))
-
-        try:
-            from jnius import autoclass
-            PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
-            ParcelFileDescriptor = autoclass('android.os.ParcelFileDescriptor')
-            File = autoclass('java.io.File')
-            Bitmap = autoclass('android.graphics.Bitmap')
-            BitmapConfig = autoclass('android.graphics.Bitmap$Config')
-            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
-            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-
-            f = File(pdf_yol)
-            pfd = ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
-            renderer = PdfRenderer(pfd)
-            sayfa_sayisi = renderer.getPageCount()
-
-            for i in range(sayfa_sayisi):
-                sayfa = renderer.openPage(i)
-                w = sayfa.getWidth() * 2
-                h = sayfa.getHeight() * 2
-                bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
-                sayfa.render(bitmap, None, None, 1)  # 1 = RENDER_MODE_FOR_DISPLAY
-                sayfa.close()
-
-                out = ByteArrayOutputStream()
-                bitmap.compress(CompressFormat.PNG, 100, out)
-                byte_array = out.toByteArray()
-                buf = io.BytesIO(bytes(byte_array))
-                core_img = CoreImage(buf, ext='png')
-                img = Image(texture=core_img.texture,
-                    size_hint_y=None, height=h / 2)
-                sayfa_layout.add_widget(img)
-
-            renderer.close()
-            pfd.close()
-
-        except Exception as e:
-            sayfa_layout.add_widget(Label(
-                text=f'PDF acilamadi:\n{str(e)}',
-                size_hint_y=None, height=dp(200)))
-
-        scroll.add_widget(sayfa_layout)
         layout.add_widget(scroll)
         self.add_widget(layout)
 
