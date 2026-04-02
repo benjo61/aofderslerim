@@ -10,6 +10,7 @@ from kivy.core.image import Image as CoreImage
 from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
+from kivy.uix.scatter import Scatter
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -49,7 +50,7 @@ def liste_btn(metin, callback):
     return btn
 
 class SayfaWidget(BoxLayout):
-    def __init__(self, sayfa_no, pdf_yol, genislik, **kwargs):
+    def __init__(self, sayfa_no, pdf_yol, **kwargs):
         super().__init__(**kwargs)
         self.sayfa_no = sayfa_no
         self.pdf_yol = pdf_yol
@@ -57,11 +58,10 @@ class SayfaWidget(BoxLayout):
         self.size_hint_y = None
         self.height = dp(400)
         self.yuklendi = False
-        self.placeholder = Label(
-            text=f'Sayfa {sayfa_no + 1} yukleniyor...',
+        self.add_widget(Label(
+            text=f'Sayfa {sayfa_no + 1}',
             size_hint_y=None, height=dp(400),
-            color=(0.5, 0.5, 0.5, 1))
-        self.add_widget(self.placeholder)
+            color=(0.5, 0.5, 0.5, 1)))
 
     def yukle(self):
         if self.yuklendi:
@@ -74,6 +74,8 @@ class SayfaWidget(BoxLayout):
             File = autoclass('java.io.File')
             Bitmap = autoclass('android.graphics.Bitmap')
             BitmapConfig = autoclass('android.graphics.Bitmap$Config')
+            Canvas = autoclass('android.graphics.Canvas')
+            PaintColor = autoclass('android.graphics.Color')
             ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
             CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
 
@@ -83,21 +85,43 @@ class SayfaWidget(BoxLayout):
             sayfa = renderer.openPage(self.sayfa_no)
             w = sayfa.getWidth() * 2
             h = sayfa.getHeight() * 2
+
+            # ARGB_8888 + beyaz arka plan
             bitmap = Bitmap.createBitmap(w, h, BitmapConfig.ARGB_8888)
+            canvas = Canvas(bitmap)
+            canvas.drawColor(PaintColor.WHITE)
             sayfa.render(bitmap, None, None, 1)
             sayfa.close()
             renderer.close()
             pfd.close()
 
             out = ByteArrayOutputStream()
-            bitmap.compress(CompressFormat.PNG, 90, out)
+            bitmap.compress(CompressFormat.PNG, 95, out)
             buf = io.BytesIO(bytes(out.toByteArray()))
             core_img = CoreImage(buf, ext='png')
-            img = Image(texture=core_img.texture,
-                size_hint_y=None, height=h / 2)
+
             self.clear_widgets()
             self.height = h / 2
-            self.add_widget(img)
+
+            # Scatter ile pinch zoom
+            scatter = Scatter(
+                do_rotation=False,
+                do_translation=True,
+                scale_min=0.5,
+                scale_max=4.0,
+                size_hint_y=None,
+                height=h / 2
+            )
+            img = Image(
+                texture=core_img.texture,
+                size=scatter.size,
+                allow_stretch=True,
+                keep_ratio=True
+            )
+            scatter.bind(size=lambda s, v: setattr(img, 'size', v))
+            scatter.add_widget(img)
+            self.add_widget(scatter)
+
         except Exception as e:
             self.clear_widgets()
             self.add_widget(Label(
@@ -107,14 +131,14 @@ class SayfaWidget(BoxLayout):
 class LazyPDFScroll(ScrollView):
     def __init__(self, pdf_yol, sayfa_sayisi, **kwargs):
         super().__init__(**kwargs)
-        self.pdf_yol = pdf_yol
         self.sayfalar = []
         self.ic = BoxLayout(orientation='vertical',
-            size_hint_y=None, spacing=dp(4), padding=[dp(4), dp(4)])
+            size_hint_y=None, spacing=dp(8),
+            padding=[dp(4), dp(4)])
         self.ic.bind(minimum_height=self.ic.setter('height'))
 
         for i in range(sayfa_sayisi):
-            sw = SayfaWidget(sayfa_no=i, pdf_yol=pdf_yol, genislik=self.width)
+            sw = SayfaWidget(sayfa_no=i, pdf_yol=pdf_yol)
             self.sayfalar.append(sw)
             self.ic.add_widget(sw)
 
@@ -123,7 +147,6 @@ class LazyPDFScroll(ScrollView):
         Clock.schedule_once(lambda dt: self.ilk_yukle(), 0.3)
 
     def ilk_yukle(self):
-        # İlk 3 sayfayı hemen yükle
         for i in range(min(3, len(self.sayfalar))):
             self.sayfalar[i].yukle()
 
@@ -134,13 +157,9 @@ class LazyPDFScroll(ScrollView):
         if not self.sayfalar:
             return
         toplam = len(self.sayfalar)
-        # scroll_y: 1=en üst, 0=en alt
-        # Hangi sayfanın görünür olduğunu hesapla
         gorünen_oran = 1 - self.scroll_y
         orta = int(gorünen_oran * toplam)
-        baslangic = max(0, orta - 2)
-        bitis = min(toplam, orta + 4)
-        for i in range(baslangic, bitis):
+        for i in range(max(0, orta - 2), min(toplam, orta + 5)):
             self.sayfalar[i].yukle()
 
 class PDFEkrani(Screen):
@@ -149,7 +168,6 @@ class PDFEkrani(Screen):
         layout = BoxLayout(orientation='vertical')
         baslik = os.path.basename(pdf_yol)[:-4]
         layout.add_widget(ust_bar(baslik, geri_func))
-
         try:
             from jnius import autoclass
             PdfRenderer = autoclass('android.graphics.pdf.PdfRenderer')
@@ -161,13 +179,9 @@ class PDFEkrani(Screen):
             sayfa_sayisi = renderer.getPageCount()
             renderer.close()
             pfd.close()
-
-            scroll = LazyPDFScroll(pdf_yol=pdf_yol, sayfa_sayisi=sayfa_sayisi)
-            layout.add_widget(scroll)
-
+            layout.add_widget(LazyPDFScroll(pdf_yol=pdf_yol, sayfa_sayisi=sayfa_sayisi))
         except Exception as e:
             layout.add_widget(Label(text=f'PDF acilamadi:\n{str(e)}'))
-
         self.add_widget(layout)
 
 class ListeEkrani(Screen):
@@ -193,10 +207,8 @@ class DerslerApp(App):
     def build(self):
         try:
             from android.permissions import request_permissions, Permission
-            request_permissions([
-                Permission.READ_EXTERNAL_STORAGE,
-                Permission.WRITE_EXTERNAL_STORAGE,
-            ])
+            request_permissions([Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE])
         except:
             pass
         try:
