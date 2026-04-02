@@ -1,4 +1,4 @@
-import os, io
+import os, io, traceback
 from kivy.app import App
 from kivy.uix.screenmanager import ScreenManager, Screen
 from kivy.uix.scrollview import ScrollView
@@ -10,6 +10,7 @@ from kivy.metrics import dp
 from kivy.graphics import Color, Rectangle
 from kivy.clock import Clock
 from kivy.uix.scatter import Scatter
+from kivy.cache import Cache
 
 DERSLER_PATH = '/storage/emulated/0/DERSLERİM'
 
@@ -21,7 +22,7 @@ def get_pdfs(yol):
     try: return sorted([f for f in os.listdir(yol) if f.lower().endswith('.pdf')])
     except: return []
 
-def ust_bar(baslik, geri_func=None):
+def ust_bar(baslik, geri_func=None, harici_ac_func=None):
     bar = BoxLayout(size_hint_y=None, height=dp(56), padding=[dp(10), dp(8)], spacing=dp(10))
     with bar.canvas.before:
         Color(0.2, 0.5, 0.8, 1)
@@ -29,10 +30,18 @@ def ust_bar(baslik, geri_func=None):
     bar.bind(pos=lambda *a: setattr(rect, 'pos', bar.pos))
     bar.bind(size=lambda *a: setattr(rect, 'size', bar.size))
     if geri_func:
-        geri = Button(text='< Geri', size_hint_x=None, width=dp(90), background_color=(0.1, 0.4, 0.7, 1), font_size=dp(16))
+        geri = Button(text='< Geri', size_hint_x=None, width=dp(70), background_color=(0.1, 0.4, 0.7, 1), font_size=dp(16))
         geri.bind(on_release=lambda x: geri_func())
         bar.add_widget(geri)
-    bar.add_widget(Label(text=baslik, font_size=dp(17), bold=True))
+        
+    bar.add_widget(Label(text=baslik, font_size=dp(15), bold=True))
+    
+    # NİHAİ B PLANI: Kivy çökerse tek tuşla Android'in kendi okuyucusuna pasla
+    if harici_ac_func:
+        harici = Button(text='DISARDA AC', size_hint_x=None, width=dp(100), background_color=(0.1, 0.6, 0.2, 1), font_size=dp(14))
+        harici.bind(on_release=lambda x: harici_ac_func())
+        bar.add_widget(harici)
+        
     return bar
 
 def liste_btn(metin, callback):
@@ -63,7 +72,6 @@ class PDFRenderer:
 
         bitmap = None
         fos = None
-        
         temp_path = os.path.join(DERSLER_PATH, f'.cache_page_{sayfa_no}.png')
         
         if os.path.exists(temp_path):
@@ -82,7 +90,6 @@ class PDFRenderer:
             cache_file = File(temp_path)
             fos = FileOutputStream(cache_file)
             bitmap.compress(CompressFormat.PNG, 90, fos)
-            
             return temp_path
         finally:
             if bitmap:
@@ -109,20 +116,19 @@ class PDFEkrani(Screen):
         
         self.layout = BoxLayout(orientation='vertical')
         baslik = os.path.basename(pdf_yol)[:-4]
-        self.layout.add_widget(ust_bar(baslik, self.geri_git))
+        
+        # Üst bara harici açma fonksiyonunu bağlıyoruz
+        self.layout.add_widget(ust_bar(baslik, self.geri_git, self.harici_okuyucuda_ac))
         
         self.goruntu_alani = BoxLayout(orientation='vertical')
         self.layout.add_widget(self.goruntu_alani)
         
-        # --- SABİT TUVAL (ASLA SİLİNMEYECEK) ---
         self.scatter = Scatter(do_rotation=False, scale_min=1.0, scale_max=5.0)
         self.sayfa_resmi = Image(allow_stretch=True, keep_ratio=True)
         self.scatter.add_widget(self.sayfa_resmi)
         
-        # Ekran boyutu değiştikçe resmi oturtmak için
         self.goruntu_alani.bind(size=self.boyutlari_guncelle)
         self.goruntu_alani.add_widget(self.scatter)
-        # --------------------------------------
         
         self.alt_bar = BoxLayout(size_hint_y=None, height=dp(60), padding=dp(5), spacing=dp(10))
         with self.alt_bar.canvas.before:
@@ -146,6 +152,31 @@ class PDFEkrani(Screen):
         self.layout.add_widget(self.alt_bar)
         self.add_widget(self.layout)
 
+    def harici_okuyucuda_ac(self):
+        try:
+            from jnius import autoclass, cast
+            Intent = autoclass('android.content.Intent')
+            Uri = autoclass('android.net.Uri')
+            File = autoclass('java.io.File')
+            
+            Builder = autoclass('android.os.StrictMode$VmPolicy$Builder')
+            StrictMode = autoclass('android.os.StrictMode')
+            builder = Builder()
+            StrictMode.setVmPolicy(builder.build())
+            
+            intent = Intent(Intent.ACTION_VIEW)
+            f = File(self.pdf_yol)
+            uri = Uri.fromFile(f)
+            intent.setDataAndType(uri, "application/pdf")
+            intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK)
+            
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            currentActivity = cast('android.app.Activity', PythonActivity.mActivity)
+            currentActivity.startActivity(intent)
+        except Exception as e:
+            self.lbl_sayfa.text = "Harici Acilamadi"
+            self.hatayi_ekrana_bas("Android Intent Hatasi", e)
+
     def boyutlari_guncelle(self, instance, value):
         self.scatter.size = value
         self.sayfa_resmi.size = value
@@ -162,28 +193,36 @@ class PDFEkrani(Screen):
             self.pdf_renderer = PDFRenderer(self.pdf_yol)
             self.sayfa_hazirla(self.mevcut_sayfa)
         except Exception as e:
-            self.lbl_sayfa.text = "Hata Olustu"
-            print(f'Motor Hatasi: {str(e)}')
+            self.lbl_sayfa.text = "Baslatma Hatasi"
+            self.hatayi_ekrana_bas("Motor Baslatilamadi", e)
+
+    def hatayi_ekrana_bas(self, baslik, e):
+        # KÖRLÜĞE SON: Hata gizlenmez, açıkça ekrana basılır.
+        self.goruntu_alani.clear_widgets()
+        hata_metni = f"{baslik}\n\n{str(e)}\n\n{traceback.format_exc()[:400]}"
+        lbl = Label(text=hata_metni, color=(1, 0.3, 0.3, 1), text_size=(Window.width - dp(40), None), halign='left', valign='top')
+        self.goruntu_alani.add_widget(lbl)
 
     def sayfa_hazirla(self, sayfa_no):
         if not self.pdf_renderer: return
         self.islem_yapiyor = True
         self.btn_onceki.disabled = True
         self.btn_sonraki.disabled = True
-        self.lbl_sayfa.text = "Sayfa Yukleniyor..."
+        self.lbl_sayfa.text = "Ciziliyor..."
         
-        # Çizim işlemi donmayı engellemek için gecikmeli başlar
         Clock.schedule_once(lambda dt: self._render_ve_bas(sayfa_no), 0.1)
 
     def _render_ve_bas(self, sayfa_no):
         try:
             cache_yol = self.pdf_renderer.sayfa_render(sayfa_no, zoom=2.0)
             
-            # WIDGET SİLMEK YOK. Sadece resmin yolunu değiştiriyoruz.
+            # Kivy'nin görüntü belleğini (Cache) zorla temizliyoruz ki beyaz ekranda kalmasın
+            Cache.remove('kv.image')
+            Cache.remove('kv.texture')
+            
             self.sayfa_resmi.source = cache_yol
             self.sayfa_resmi.reload()
             
-            # Yeni sayfaya geçince zoom'u ve pozisyonu sıfırla
             self.scatter.scale = 1.0
             self.scatter.pos = (0, 0)
             
@@ -196,8 +235,8 @@ class PDFEkrani(Screen):
             
         except Exception as e:
             self.islem_yapiyor = False
-            self.lbl_sayfa.text = "Hata Olustu"
-            print(f'Sayfa Hatasi: {str(e)}')
+            self.lbl_sayfa.text = "Render Coktu"
+            self.hatayi_ekrana_bas("Sayfa Cizim Hatasi", e)
 
     def onceki_sayfa(self, instance):
         if self.mevcut_sayfa > 0 and not self.islem_yapiyor:
